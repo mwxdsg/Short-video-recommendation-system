@@ -10,7 +10,6 @@ import warnings
 warnings.filterwarnings('ignore')
 
 # ==================== 全局配置 ====================
-OUTPUT_FILE = "optimized_behavior.xlsx"
 CACHE_DIR = "./cache"
 
 # ==================== 数据缓存 ====================
@@ -18,26 +17,52 @@ memory = Memory(CACHE_DIR, verbose=0)
 
 @memory.cache
 def load_data(file_path):
-    """ 优化版数据加载 """
     # 只读取必要列并指定数据类型
     dtype_spec = {
-        '用户ID': 'category', '视频URL': 'string', 
-        '所属类别': 'category', '观看次数': 'uint32', 
+        '用户ID': 'category',
+        '视频URL': 'string', 
+        '所属类别': 'category',
+        '观看次数': 'uint32', 
         '点赞次数': 'uint16'
     }
     
     with pd.ExcelFile(file_path) as xls:
-        watch = pd.read_excel(
-            xls, sheet_name="Watch History",
-            usecols=["用户ID", "视频URL", "观看时间"],
-            dtype=dtype_spec
+        # 1. 处理Watch History表（特殊格式）
+        watch_raw = pd.read_excel(
+            xls, 
+            sheet_name="Watch History",
+            dtype={'用户ID': 'category'}
         )
-        videos = pd.read_excel(
-            xls, sheet_name="Video Statistics",
+        
+        # 转换7天分列格式为规范化的长格式
+        watch_dfs = []
+        date_columns = [col for col in watch_raw.columns if col not in ['用户ID']]
+        
+        for date_col in date_columns:
+            temp_df = watch_raw[['用户ID', date_col]].copy()
+            temp_df = temp_df.rename(columns={date_col: '视频URL'})
+            temp_df['观看日期'] = date_col  # 保留原日期信息
+            
+            # 拆分逗号分隔的URL
+            temp_df = (
+                temp_df.dropna(subset=['视频URL'])
+                .assign(视频URL=lambda x: x['视频URL'].str.split(',\s*'))
+                .explode('视频URL')
+            )
+            watch_dfs.append(temp_df)
+        
+        watch_df = pd.concat(watch_dfs, ignore_index=True)
+        
+        # 2. 处理Video Statistics表（标准格式）
+        videos_df = pd.read_excel(
+            xls, 
+            sheet_name="Video Statistics",
             usecols=["视频URL", "所属类别", "观看次数", "点赞次数"],
             dtype=dtype_spec
         )
-    return watch, videos
+        
+        
+        return watch_df, videos_df
 
 # ==================== 核心优化 ====================
 class Recommender:
@@ -112,14 +137,13 @@ class Recommender:
 if __name__ == "__main__":
     # 1. 加载数据
     print("正在加载数据...")
-    watch_df, videos_df = load_data("user_behavior_details_tfidf.xlsx")
+    watch_df, videos_df = load_data("user_behavior_7days.xlsx")
     
     # 2. 初始化推荐引擎
     engine = Recommender(watch_df, videos_df)
     
     # 3. 为用户生成推荐
-    user_id = "U0010"
+    user_id = "U0002"
     print(f"\n为用户 {user_id} 生成推荐:")
     recs = engine.get_user_recommendations(user_id, top_n=5)
     print(recs[["所属类别", "观看次数", "final_score"]])
-    
