@@ -21,16 +21,16 @@ def load_data(file_path):
     dtype_spec = {
         '用户ID': 'category',
         '视频URL': 'string', 
-        '所属类别': 'category',
+        '类别': 'category',
         '观看次数': 'uint32', 
-        '点赞次数': 'uint16'
+        '点赞数': 'uint16'
     }
     
     with pd.ExcelFile(file_path) as xls:
         # 1. 处理Watch History表（特殊格式）
         watch_raw = pd.read_excel(
             xls, 
-            sheet_name="Watch History",
+            sheet_name="观看记录",
             dtype={'用户ID': 'category'}
         )
         
@@ -56,8 +56,8 @@ def load_data(file_path):
         # 2. 处理Video Statistics表（标准格式）
         videos_df = pd.read_excel(
             xls, 
-            sheet_name="Video Statistics",
-            usecols=["视频URL", "所属类别", "观看次数", "点赞次数"],
+            sheet_name="视频统计",
+            usecols=["视频URL", "类别", "观看次数", "点赞数"],
             dtype=dtype_spec
         )
         
@@ -72,9 +72,9 @@ class Recommender:
         self.videos = videos_df.set_index("视频URL")
         
         # 预计算全局数据
-        self.category_stats = videos_df["所属类别"].value_counts(normalize=True)
+        self.category_stats = videos_df["类别"].value_counts(normalize=True)
         self.max_views = videos_df["观看次数"].max()
-        self.max_likes = videos_df["点赞次数"].max()
+        self.max_likes = videos_df["点赞数"].max()
         
         # 用户相似度矩阵
         self.user_sim_matrix = self._precompute_user_similarity()
@@ -83,7 +83,7 @@ class Recommender:
         """ 预计算用户相似度 """
         user_cat_matrix = (
             self.watch.join(self.videos, on="视频URL")
-            .groupby(["用户ID", "所属类别"])
+            .groupby(["用户ID", "类别"])
             .size()
             .unstack(fill_value=0)
         )
@@ -94,7 +94,7 @@ class Recommender:
         # 获取用户历史
         try:
             user_watched = self.watch.loc[user_id]["视频URL"].tolist()
-            user_categories = self.videos.loc[user_watched]["所属类别"]
+            user_categories = self.videos.loc[user_watched]["类别"]
             cat_counts = user_categories.value_counts()
         except KeyError:
             return self._get_fallback_recommendations(top_n)
@@ -104,9 +104,9 @@ class Recommender:
         
         # 向量化评分
         candidates["base_score"] = (
-            0.4 * candidates["所属类别"].map(cat_counts).fillna(0) +
+            0.4 * candidates["类别"].map(cat_counts).fillna(0) +
             0.4 * candidates["观看次数"] / self.max_views +
-            0.2 * candidates["点赞次数"] / self.max_likes
+            0.2 * candidates["点赞数"] / self.max_likes
         )
         
         # 多样性增强
@@ -118,7 +118,7 @@ class Recommender:
     def _apply_diversity(self, candidates, user_categories):
         """ 多样性增强策略 """
         # 1. 类别覆盖率奖励
-        candidates["cat_coverage"] = ~candidates["所属类别"].isin(user_categories)
+        candidates["cat_coverage"] = ~candidates["类别"].isin(user_categories)
         # 2. 长尾内容奖励
         candidates["longtail"] = candidates["观看次数"] < self.max_views * 0.1
         # 3. 综合得分
@@ -143,7 +143,7 @@ if __name__ == "__main__":
     engine = Recommender(watch_df, videos_df)
     
     # 3. 为用户生成推荐
-    user_id = "U0002"
+    user_id = "U0001"
     print(f"\n为用户 {user_id} 生成推荐:")
     recs = engine.get_user_recommendations(user_id, top_n=5)
-    print(recs[["所属类别", "观看次数", "final_score"]])
+    print(recs[["类别", "观看次数", "final_score"]])
