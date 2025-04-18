@@ -1,4 +1,3 @@
-
 # -*- coding: utf-8 -*-
 
 # 视频用户行为模拟系统 - 综合版
@@ -46,11 +45,13 @@ DAYS_TO_SIMULATE = 7
 class Video:
     """视频对象，存储元数据和行为统计"""
 
-    def __init__(self, url, keywords):
+    def __init__(self, url, keywords, cover_url=None, play_url=None):
         self.url = url.strip()
         self.keywords = [kw for kw in (keywords.split() if keywords else []) if kw]
         self.category = None
         self.like_count = 0
+        self.cover_url = cover_url.strip() if cover_url else None  # 新增封面地址
+        self.play_url = play_url.strip() if play_url else None      # 新增播放地址
         self.viewers = set()  # 存储观看过的用户ID（自动去重）
         self.liked_users = set()  # 存储点赞过的用户ID
 
@@ -67,8 +68,8 @@ class User:
     def _generate_interests(self, categories):
         """随机生成用户兴趣分布"""
         if not categories:
-            return {}
-        # 确保兴趣数量不超过实际类别数
+            print("警告: 没有有效的类别，用户兴趣将使用默认值")
+            return {'默认类别': 1.0}  # 提供默认兴趣
         num_interests = random.randint(
             min(MIN_INTERESTS, len(categories)),
             min(MAX_INTERESTS, len(categories)))
@@ -76,39 +77,88 @@ class User:
         return {cat: random.uniform(0.7, 1.0) for cat in chosen_cats}
 
 
+
 # ==================== 数据处理函数 ====================
 def load_excel_data(file_path):
-    """从Excel加载视频数据（自动检测URL和关键词列）"""
+    """从Excel加载视频数据（自动检测URL、关键词、封面地址和播放地址列，确保数据完整无空）"""
+    # 检查文件是否存在
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"输入文件 {file_path} 不存在")
 
     try:
+        # 加载Excel文件
         wb = load_workbook(file_path)
         ws = wb.active
         videos = []
         col_mapping = {}
+        seen_urls = set()  # 用于跟踪已见过的URL
 
         # 自动检测列位置（兼容中英文列名）
         for col in range(1, ws.max_column + 1):
             header = ws.cell(row=1, column=col).value
-            if header and 'url' in header.lower():
-                col_mapping['url'] = col
-            elif header and ('keyword' in header.lower() or '标签' in header.lower()):
-                col_mapping['keywords'] = col
+            if header:
+                header_lower = str(header).lower()
+                if 'url' in header_lower:
+                    col_mapping['url'] = col
+                elif 'keyword' in header_lower or '标签' in header_lower:
+                    col_mapping['keywords'] = col
+                elif 'cover' in header_lower or '封面' in header_lower:
+                    col_mapping['cover_url'] = col
+                elif 'play' in header_lower or '播放' in header_lower:
+                    col_mapping['play_url'] = col
 
-        if not col_mapping:
-            raise ValueError("未找到必要的列（url/keywords）")
+        # 检查必要的列是否存在
+        if 'url' not in col_mapping or 'keywords' not in col_mapping:
+            raise ValueError("未找到必要的列（url 和 keywords/标签）")
 
         # 读取视频数据
         for row in range(2, ws.max_row + 1):
-            url = ws.cell(row=row, column=col_mapping['url']).value
-            keywords = ws.cell(row=row, column=col_mapping['keywords']).value or ""
-            if url:
-                videos.append(Video(url, keywords))
+            url_cell = ws.cell(row=row, column=col_mapping['url'])
+            keywords_cell = ws.cell(row=row, column=col_mapping['keywords'])
+            cover_url_cell = ws.cell(row=row, column=col_mapping['cover_url']) if 'cover_url' in col_mapping else None
+            play_url_cell = ws.cell(row=row, column=col_mapping['play_url']) if 'play_url' in col_mapping else None
 
+            # 检查URL是否为空
+            if url_cell.value is None or not str(url_cell.value).strip():
+                print(f"警告: 行 {row} 的URL为空，跳过")
+                continue
+            url = str(url_cell.value).strip()
+
+            # 检查URL是否重复
+            if url in seen_urls:
+                print(f"警告: 行 {row} 的URL {url} 重复，跳过")
+                continue
+            seen_urls.add(url)
+
+            # 处理关键词（空值转换为默认空字符串）
+            keywords = str(keywords_cell.value).strip() if keywords_cell.value else ""
+            if not keywords:
+                print(f"提示: 行 {row} 的关键词为空，已设置为默认空字符串")
+
+            # 处理封面地址（列存在时读取，否则为None）
+            cover_url = None
+            if cover_url_cell and cover_url_cell.value:
+                cover_url = str(cover_url_cell.value).strip()
+
+            # 处理播放地址（列存在时读取，否则为None）
+            play_url = None
+            if play_url_cell and play_url_cell.value:
+                play_url = str(play_url_cell.value).strip()
+
+            # 创建Video对象并添加到列表
+            videos.append(Video(url, keywords, cover_url, play_url))
+
+        # 验证加载结果
+        if not videos:
+            raise ValueError("Excel文件中没有有效的视频数据")
+
+        print(f"从Excel加载了 {len(videos)} 个唯一视频")
         return videos
+
     except Exception as e:
         raise ValueError(f"Excel读取错误: {str(e)}")
+
+
 
 
 def auto_categorize(videos):
@@ -182,7 +232,6 @@ def auto_categorize(videos):
 
 # ==================== 行为模拟函数 ====================
 def simulate_behavior(users, videos):
-    """模拟7天的用户观看和点赞行为"""
     if not users or not videos:
         print("警告: 缺少用户或视频数据")
         return
@@ -193,22 +242,19 @@ def simulate_behavior(users, videos):
         if v.category:
             cat_index[v.category].append(v)
 
-    # 7天日期范围（从6天前到今天）
+    # 7天日期范围
     base_date = datetime.now().date()
     date_range = [base_date - timedelta(days=i) for i in range(DAYS_TO_SIMULATE - 1, -1, -1)]
 
+    # 确保每个视频至少被观看一次
+    unwatched = set(videos)
     for user in tqdm(users, desc="模拟用户行为"):
         for day in date_range:
-            # 每天1-3个会话
             for _ in range(random.randint(1, 3)):
-                # 生成会话时间（当天8-23点）
                 session_time = datetime.combine(day, datetime.min.time()).replace(
                     hour=random.randint(8, 23),
                     minute=random.randint(0, 59))
-
-                # 每个会话观看10-30个视频
                 for _ in range(random.randint(10, 30)):
-                    # 90%概率按兴趣选择视频
                     if user.interests and random.random() < 0.9:
                         chosen_cat = random.choices(
                             list(user.interests.keys()),
@@ -222,14 +268,21 @@ def simulate_behavior(users, videos):
                     if candidates:
                         video = random.choice(candidates)
                         _record_watch(user, video, session_time)
-
-                        # 动态计算点赞概率（基础20% + 兴趣权重）
+                        unwatched.discard(video)
                         like_prob = 0.2
                         if video.category in user.interests:
                             like_prob += user.interests[video.category] * 0.8
-
                         if random.random() < like_prob:
                             _record_like(user, video, session_time)
+
+    # 处理剩余未观看的视频
+    if unwatched:
+        print(f"强制观看 {len(unwatched)} 个未观看视频...")
+        for video in unwatched:
+            user = random.choice(users)
+            session_time = datetime.combine(date_range[0], datetime.min.time()).replace(hour=8)
+            _record_watch(user, video, session_time)
+
 
 
 def _record_watch(user, video, time):
@@ -386,9 +439,16 @@ def _create_like_history_sheet(wb, users):
 
 def _create_video_stats_sheet(wb, videos):
     ws = wb.create_sheet("视频统计")
-    ws.append(["视频URL", "类别", "观看次数", "点赞数"])
+    ws.append(["视频URL", "封面地址", "播放地址", "类别", "观看次数", "点赞数"])
     for video in videos:
-        ws.append([video.url, video.category, len(video.viewers), video.like_count])
+        ws.append([
+            video.url,
+            video.cover_url or "",
+            video.play_url or "",
+            video.category,
+            len(video.viewers),
+            video.like_count
+        ])
 
 
 def _create_daily_views_sheet(wb, videos, users):
@@ -407,13 +467,16 @@ def _create_hot_ranking_sheet(wb, videos):
     ws = wb.create_sheet("热门排行")
     ranking = generate_hot_ranking(videos)
 
-    headers = ["排名", "视频URL", "类别", "观看数", "点赞数", "热度"]
+    headers = ["排名", "视频URL", "封面地址", "播放地址", "类别", "观看数", "点赞数", "热度"]
     ws.append(headers)
 
     for item in ranking:
+        video = next((v for v in videos if v.url == item["视频URL"]), None)
         ws.append([
             item["排名"],
             item["视频URL"],
+            video.cover_url if video else "",
+            video.play_url if video else "",
             item["类别"],
             item["观看数"],
             item["点赞数"],
@@ -426,7 +489,7 @@ if __name__ == "__main__":
     try:
         # 第1步：加载视频数据
         print("正在加载视频数据...")
-        videos = load_excel_data("D:\Desktop\数据结构大作业\数据1.xlsx")  # 默认使用当前目录下的videos.xlsx
+        videos = load_excel_data("D:\Desktop\数据结构大作业\数据3.xlsx")  # 默认使用当前目录下的videos.xlsx
         print(f"加载成功，共 {len(videos)} 个视频")
 
         # 第2步：尝试从之前的报告文件中恢复分类信息，否则自动分类视频
@@ -455,9 +518,16 @@ if __name__ == "__main__":
         print(f"创建 {NUM_USERS} 个模拟用户...")
         users = [User(i, valid_categories) for i in range(NUM_USERS)]
 
-        # 第4步：模拟7天的用户行为
+        # 第4步：模拟7天的用户行为后检查数据
         print(f"模拟 {DAYS_TO_SIMULATE} 天用户行为...")
         simulate_behavior(users, videos)
+
+        # 数据验证
+        print("\n=== 数据验证 ===")
+        unwatched_videos = [v for v in videos if not v.viewers]
+        inactive_users = [u for u in users if not u.watched_videos or not u.interests]
+        print(f"无人观看的视频数: {len(unwatched_videos)}")
+        print(f"无兴趣或无观看记录的用户数: {len(inactive_users)}")
 
         # 第5步：生成报告
         print(f"生成报告 {OUTPUT_FILENAME}...")
@@ -481,7 +551,7 @@ if __name__ == "__main__":
                 print(f"  {i + 1}. {url[:50]}... (观看数: {views}, 点赞数: {likes})")
             print("完整视频列表已保存在Excel报告中")
 
-        # 第7步：执行用户聚类分析
+            # 第7步：执行用户聚类分析
         print("\n=== 用户聚类分析 ===")
         user_clusters = user_clustering.cluster_users(users, videos)
         user_clustering.save_user_clusters_report(user_clusters, "user_clusters.xlsx")
@@ -507,9 +577,15 @@ if __name__ == "__main__":
         print(f"点赞率: {total_likes / total_views:.1%}")
         print(f"已保存到 {OUTPUT_FILENAME}")
 
+
     except FileNotFoundError as e:
+
         print(f"文件错误: {str(e)}")
+
     except ValueError as e:
+
         print(f"数据错误: {str(e)}")
+
     except Exception as e:
+
         print(f"意外错误: {str(e)}")
