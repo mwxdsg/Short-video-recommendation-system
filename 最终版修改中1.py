@@ -933,27 +933,98 @@ if __name__ == "__main__":
         # === Step 7: Advanced Clustering Analysis ===
         print(f"\n--- [步骤 7] 高级聚类分析 ---")
 
-        # F6: 视频聚类分析
+        # === Step 7: Advanced Clustering Analysis ===
+        print(f"\n--- [步骤 7] 高级聚类分析 ---")
+
+        # F6: 视频聚类分析 (*** 这是修改的核心区域 ***)
         try:
-            print("\n执行视频聚类分析...")
-            video_clusters = video_clustering.cluster_videos_by_viewers(videos, users, n_clusters=50)
+            # 记录开始时间
+            video_cluster_start_time = time.time()
 
-            # 保存到独立Excel
-            video_cluster_file = "video_clusters.xlsx"
-            with pd.ExcelWriter(video_cluster_file) as writer:
-                video_clusters.to_excel(writer, sheet_name="视频聚类", index=False)
+            # -------------------- 使用优化版聚类函数 --------------------
+            print("\n执行视频聚类分析 (使用优化版：稀疏矩阵 + 可选SVD + 平衡)...")
 
-                # 添加聚类统计信息
-                cluster_stats = video_clusters.groupby("聚类ID").agg({
-                    "视频URL": "count",
-                    "代表性用户数": "mean"
-                }).rename(columns={"视频URL": "视频数量", "代表性用户数": "平均用户数"})
-                cluster_stats.to_excel(writer, sheet_name="聚类统计")
+            # 调用新的优化函数 cluster_videos_by_viewers_balanced_optimized
+            # 注意：这里传递了新的参数 svd_components 和 mbk_n_init
+            video_clusters = video_clustering.cluster_videos_by_viewers_balanced_optimized(
+                videos=videos,
+                users=users,
+                n_clusters=100,  # 初始目标簇数 (函数内部仍强制为100开始)
+                batch_size=5000,  # MiniBatchKMeans 的批处理大小 (可调)
+                max_size_factor=1.8,  # 控制簇平衡的严格程度 (越小越严格)
+                split_k=2,  # 将过大的簇拆分成 k 个子簇
+                svd_components=150,  # SVD降维的目标维度 (关键调优参数! 0 表示禁用)
+                mbk_n_init=5  # MiniBatchKMeans 的 n_init (建议比默认值小以加速)
+            )
+            # -------------------------------------------------------------
 
-            print(f"视频聚类结果已保存到 {video_cluster_file}")
+            # (确保注释掉或删除了对旧的 cluster_videos_by_viewers_balanced 函数的调用)
+            # print("  使用 MiniBatchKMeans + 后处理平衡聚类...")
+            # video_clusters = video_clustering.cluster_videos_by_viewers_balanced(
+            #     videos,
+            #     users,
+            #     n_clusters=100,
+            #     max_size_factor=1.8,
+            #     split_k=2
+            # )
+
+            # 记录结束时间并打印耗时
+            video_cluster_end_time = time.time()
+            print(f"  >>> 优化版视频聚类耗时: {video_cluster_end_time - video_cluster_start_time:.2f} 秒 <<<")
+
+            # 检查聚类是否成功返回 DataFrame 且不为空
+            if video_clusters is None or video_clusters.empty:
+                print("  视频聚类未生成有效结果或返回空 DataFrame，跳过保存。")
+            else:
+                # 保存到独立Excel (*** 修改输出文件名以区分 ***)
+                video_cluster_file = "video_clusters_optimized_balanced.xlsx"  # <--- 新的文件名
+                print(f"  准备将优化版聚类结果保存到 '{video_cluster_file}'...")
+                try:
+                    with pd.ExcelWriter(video_cluster_file) as writer:
+                        # 保存详细的聚类结果
+                        video_clusters.to_excel(writer, sheet_name="视频聚类详情", index=False)
+                        print(f"    已写入 '视频聚类详情' sheet ({len(video_clusters)} 行)。")
+
+                        # 添加聚类统计信息 (使用新函数实际产生的列名)
+                        print("    计算并写入 '聚类统计' sheet...")
+                        # 确保 '聚类ID' 和 '观看该视频的用户数' 列存在
+                        if "聚类ID" in video_clusters.columns and "观看该视频的用户数" in video_clusters.columns:
+                            # 使用 '观看该视频的用户数' 和 '聚类内视频数' 进行聚合
+                            cluster_stats = video_clusters.groupby("聚类ID").agg(
+                                视频数量=("视频URL", "count"),  # 使用 '视频URL' 列计数
+                                平均观看用户数_每个视频=("观看该视频的用户数", "mean"),  # 使用优化函数输出的列名
+                                # 实际簇大小直接从DataFrame中获取，避免重复计算
+                                # unique() 更适合获取单一值，这里用 first()
+                                # 或者直接使用 '聚类内视频数' 列，但确保其存在
+                                实际簇大小=("聚类内视频数", "first")  # 假设 '聚类内视频数' 列已正确添加
+                            ).reset_index()
+
+                            cluster_stats.to_excel(writer, sheet_name="聚类统计", index=False)
+                            print(f"      写入了 {len(cluster_stats)} 个聚类的统计信息。")
+                        else:
+                            print(
+                                "    警告：无法生成聚类统计，因为 '聚类ID', '观看该视频的用户数' 或 '聚类内视频数' 列在结果中缺失。")
+
+                    print(f"  优化版视频聚类结果已保存到 {video_cluster_file}")
+                except Exception as save_err:
+                    print(f"  错误：保存优化版视频聚类结果到Excel时失败: {save_err}")
+                    # 可以尝试保存为CSV作为备选
+                    try:
+                        csv_path = os.path.splitext(video_cluster_file)[0] + ".csv"
+                        video_clusters.to_csv(csv_path, index=False, encoding='utf-8-sig')
+                        print(f"  已尝试将结果保存为 CSV: {csv_path}")
+                    except Exception as csv_save_err:
+                        print(f"  错误：尝试保存为 CSV 也失败了: {csv_save_err}")
+
+
+        except AttributeError as ae:
+            print(f"\n视频聚类失败：属性错误 - {ae}")
+            print(
+                "  请确保 'video_clustering.py' 文件中存在名为 'cluster_videos_by_viewers_balanced_optimized' 的函数。")
         except Exception as e:
-            print(f"视频聚类失败: {str(e)}")
-
+            print(f"\n视频聚类或结果保存时发生错误: {str(e)}")
+            print("详细错误追踪:")
+            traceback.print_exc()
         # F7: 用户聚类分析
         try:
             print("\n执行用户聚类分析...")
