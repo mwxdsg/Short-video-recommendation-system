@@ -414,7 +414,7 @@ def simulate_behavior(users, videos):
                 )
 
                 # Simulate 10 to 30 actions (watches/likes) per session
-                for _ in range(random.randint(10, 30)):
+                for _ in range(random.randint(30, 40)):
                     chosen_video = None
                     # Decide whether to watch based on interest (90% chance) or explore randomly (10%)
                     if user_interest_categories and random.random() < 0.9:
@@ -930,6 +930,52 @@ if __name__ == "__main__":
         print(f"\n--- [步骤 6] 生成详细报告 ---")
         save_detailed_report(users, videos, OUTPUT_FILENAME) # Uses global OUTPUT_FILENAME
 
+        # === Step 7: Advanced Clustering Analysis ===
+        print(f"\n--- [步骤 7] 高级聚类分析 ---")
+
+        # F6: 视频聚类分析
+        try:
+            print("\n执行视频聚类分析...")
+            video_clusters = video_clustering.cluster_videos_by_viewers(videos, users, n_clusters=50)
+
+            # 保存到独立Excel
+            video_cluster_file = "video_clusters.xlsx"
+            with pd.ExcelWriter(video_cluster_file) as writer:
+                video_clusters.to_excel(writer, sheet_name="视频聚类", index=False)
+
+                # 添加聚类统计信息
+                cluster_stats = video_clusters.groupby("聚类ID").agg({
+                    "视频URL": "count",
+                    "代表性用户数": "mean"
+                }).rename(columns={"视频URL": "视频数量", "代表性用户数": "平均用户数"})
+                cluster_stats.to_excel(writer, sheet_name="聚类统计")
+
+            print(f"视频聚类结果已保存到 {video_cluster_file}")
+        except Exception as e:
+            print(f"视频聚类失败: {str(e)}")
+
+        # F7: 用户聚类分析
+        try:
+            print("\n执行用户聚类分析...")
+            user_clusters = user_clustering.cluster_users_by_interests(users, videos, n_clusters=100)
+
+            # 保存到独立Excel
+            user_cluster_file = "user_clusters.xlsx"
+            with pd.ExcelWriter(user_cluster_file) as writer:
+                user_clusters.to_excel(writer, sheet_name="用户聚类", index=False)
+
+                # 添加聚类统计信息
+                cluster_stats = user_clusters.groupby("聚类ID").agg({
+                    "用户ID": "count",
+                    "观看类别数": "mean"
+                }).rename(columns={"用户ID": "用户数量", "观看类别数": "平均类别数"})
+                cluster_stats.to_excel(writer, sheet_name="聚类统计")
+
+            print(f"用户聚类结果已保存到 {user_cluster_file}")
+        except Exception as e:
+            print(f"用户聚类失败: {str(e)}")
+
+        print("\n高级聚类分析完成!")
     except FileNotFoundError as fnf:
         print(f"错误：找不到所需文件! {fnf}")
         print("请确认所有输入文件路径正确，或检查相关目录权限。")
