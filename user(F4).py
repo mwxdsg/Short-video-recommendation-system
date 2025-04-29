@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
-""" 修复日期问题的优化版 """
 import pandas as pd
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 from joblib import Memory
 import warnings
 warnings.filterwarnings('ignore')
+import json
 
-# ==================== 数据加载（修复日期问题） ====================
+# ==================== 数据加载 ====================
 memory = Memory("./cache", verbose=0)
 
 @memory.cache
@@ -18,8 +18,9 @@ def load_data(file_path):
         '视频URL': 'string', 
         '类别': 'category',
         '观看次数': 'uint32', 
-        '点赞数': 'uint16'
-    }
+        '点赞数': 'uint16',
+        '封面地址':'string',
+            }
     
     with pd.ExcelFile(file_path) as xls:
         # 1. 处理Watch History表（特殊格式）
@@ -52,19 +53,58 @@ def load_data(file_path):
         videos_df = pd.read_excel(
             xls, 
             sheet_name="视频统计",
-            usecols=["视频URL", "类别", "观看次数", "点赞数"],
+            usecols=["视频URL", "类别", "观看次数", "点赞数","封面地址"],
             dtype=dtype_spec
         )
+    
+    column_mapping = {
+        'video_url': '视频URL',  # 将CSV中的video_url映射为主数据中的视频URL
+        'title': 'title',        # 保持title列名不变
+        'id':'id'
+    }
+
+        #3.处理merge
+    merge_df = pd.read_csv(
+        'merge.csv', 
+        usecols=["video_url", "title","id"],
+        dtype={'video_url': 'string', 'title': 'string','id':'int'},
+        encoding='utf-8'
+        )
+    #4.合并数据
+    videos_df = videos_df.merge(
+            merge_df,
+            left_on='视频URL',
+            right_on='video_url',
+            how='left'
+        )
+    videos_df['title'] = videos_df['title'].fillna('未知标题')
         
-        
-        return watch_df, videos_df
+    return watch_df, videos_df
+
+def recommendations_to_json(recommendations):
+    """将推荐结果转为格式化的JSON字符串"""
+    if isinstance(recommendations, pd.DataFrame):
+    # 重置索引并选择需要输出的列
+        output_cols = ["title","id", "封面地址", "观看次数"]
+        available_cols = [col for col in output_cols if col in recommendations.columns]
+                
+                # 转换为字典列表
+        recs_dict = recommendations.reset_index()[available_cols].to_dict(orient='records')
+                
+                # 转换为JSON并美化输出
+        return json.dumps({
+                "recommendations": recs_dict,
+                "count": len(recommendations)
+            }, indent=2, ensure_ascii=False)
+    else:
+        return json.dumps({"error": "推荐结果不是DataFrame格式"}, ensure_ascii=False)
+
 
 # ==================== 推荐引擎 ====================
 class Recommender:
     def __init__(self, watch_df, videos_df):
         self.watch = watch_df.set_index("用户ID")
         self.videos = videos_df.set_index("视频URL")
-        self.category_stats = videos_df["类别"].value_counts(normalize=True)
         self.max_views = videos_df["观看次数"].max()
         self.max_likes = videos_df["点赞数"].max()
 
@@ -113,17 +153,25 @@ class Recommender:
     def _get_fallback_recommendations(self, top_n):
         """ 新用户冷启动策略 """
         return self.videos.nlargest(top_n, "观看次数")
+    
 
 # ==================== 使用示例 ====================
+def main():
+    if __name__ == "__main__":
+        print("正在加载数据...")
+        try:
+            watch_df, videos_df = load_data("user_behavior_7days.xlsx")
+            engine = Recommender(watch_df, videos_df)
+            
+            user_id = "U0001"
+            print(f"\n为用户 {user_id} 生成推荐:")
+            recs = engine.get_user_recommendations(user_id, top_n=100)
+            print(recs[["title","id","封面地址","观看次数"]])
+            recs_json = recommendations_to_json(recs)
+            print(recs_json)
+            return recs_json
+        except Exception as e:
+            print(f"发生错误: {str(e)}")
+
 if __name__ == "__main__":
-    print("正在加载数据...")
-    try:
-        watch_df, videos_df = load_data("user_behavior_7days.xlsx")
-        engine = Recommender(watch_df, videos_df)
-        
-        user_id = "U0002"
-        print(f"\n为用户 {user_id} 生成推荐:")
-        recs = engine.get_user_recommendations(user_id, top_n=5)
-        print(recs[["类别", "观看次数", "final_score"]])
-    except Exception as e:
-        print(f"发生错误: {str(e)}")
+    main()
