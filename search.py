@@ -5,6 +5,7 @@ from sklearn.metrics.pairwise import cosine_similarity
 from joblib import Memory
 import jieba  # 中文分词
 import warnings
+import json
 warnings.filterwarnings('ignore')
 
 # ==================== 数据加载 ====================
@@ -14,19 +15,55 @@ memory = Memory("./cache", verbose=0)
 def load_data(file_path):
     """加载视频统计数据（仅使用类别字段）"""
     dtype_spec = {
+        '用户ID': 'category',
         '视频URL': 'string', 
         '类别': 'category',
         '观看次数': 'uint32', 
-        '点赞数': 'uint16'
-    }
+        '点赞数': 'uint16',
+        '封面地址':'string',
+                }
     
     with pd.ExcelFile(file_path) as xls:
-        return pd.read_excel(
+        videos = pd.read_excel(
             xls, 
             sheet_name="视频统计",
-            usecols=["视频URL", "类别", "观看次数", "点赞数"],
+            usecols=["视频URL", "类别", "观看次数", "点赞数","封面地址"],
             dtype=dtype_spec
         )
+    
+    merge_df = pd.read_csv(
+        'merge.csv', 
+        usecols=["video_url", "title","id"],
+        dtype={'video_url': 'string', 'title': 'string','id':'int'},
+        encoding='utf-8'
+        )
+    #4.合并数据
+    videos = videos.merge(
+            merge_df,
+            left_on='视频URL',
+            right_on='video_url',
+            how='left'
+        )
+    videos['title'] = videos['title'].fillna('未知标题')
+    return videos
+
+def recommendations_to_json(recommendations):
+    """将推荐结果转为格式化的JSON字符串"""
+    if isinstance(recommendations, pd.DataFrame):
+    # 重置索引并选择需要输出的列
+        output_cols = ["title","id", "视频URL","封面地址", "观看次数"]
+        available_cols = [col for col in output_cols if col in recommendations.columns]
+                
+                # 转换为字典列表
+        recs_dict = recommendations.reset_index()[available_cols].to_dict(orient='records')
+                
+                # 转换为JSON并美化输出
+        return json.dumps({
+                "recommendations": recs_dict,
+                "count": len(recommendations)
+            }, indent=2, ensure_ascii=False)
+    else:
+        return json.dumps({"error": "推荐结果不是DataFrame格式"}, ensure_ascii=False)
 
 # ==================== 视频搜索系统 ====================
 class Search:
@@ -77,15 +114,18 @@ class Search:
         return (result_df
                 .sort_values(["相关度", "观看次数"], ascending=[False, False])
                 .head(top_n)
-                [["视频URL", "类别", "相关度", "观看次数", "点赞数"]])
+                [["视频URL", "类别", "相关度", "观看次数", "点赞数","title","id","封面地址"]])
     
 
 # ==================== 使用示例 ====================
-if __name__ == "__main__":
+def main():
     # 初始化搜索引擎
     searcher = Search("user_behavior_7days.xlsx")
     
-    # 示例搜索
-    print("=== 类别搜索示例 ===")
     results = searcher.search("体育", top_n=5)
+    results = recommendations_to_json(results)
     print(results)
+    return results
+
+if __name__ == "__main__":
+    main()
