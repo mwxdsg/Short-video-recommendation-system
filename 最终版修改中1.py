@@ -23,6 +23,8 @@ import os
 import sys # Import sys for potentially exiting on critical errors
 from datetime import datetime, timedelta
 from collections import defaultdict, Counter
+import json
+from openpyxl.utils import get_column_letter
 from sklearn.cluster import DBSCAN
 from sklearn.preprocessing import StandardScaler
 # Make sure openpyxl is installed if you intend to use convert_excel_to_csv
@@ -50,6 +52,8 @@ try:
     import video_clustering
     import user_clustering
     import category_recovery
+    import user_center
+    import videos_playing
 except ImportError as e:
     print(f"Error importing custom modules: {e}")
     print("Please ensure video_clustering.py, user_clustering.py, and category_recovery.py are present.")
@@ -64,6 +68,54 @@ DAYS_TO_SIMULATE = 7
 # Define source Excel and target CSV paths clearly
 SOURCE_EXCEL_PATH = "D:/Desktop/数据结构大作业/数据3.xlsx"
 TARGET_CSV_PATH = "D:/Desktop/数据结构大作业/数据3.csv"
+
+
+def clean_excel_data(text):
+    """
+    彻底清理数据中所有可能引起Excel问题的特殊字符
+    参数:
+        text: 要清理的文本（可以是任何类型）
+    返回:
+        完全清理后的安全字符串
+    """
+    if text is None:
+        return ""
+
+    # 转换为字符串
+    text = str(text)
+
+    # 1. 移除所有控制字符（ASCII 0-31，除了\t,\n,\r）
+    text = "".join(ch for ch in text if ord(ch) >= 32 or ch in ("\t", "\n", "\r"))
+
+    # 2. 替换特定特殊字符
+    replacements = {
+        "|": "-",
+        "\t": " ",  # 制表符替换为空格
+        "\n": " ",  # 换行符替换为空格
+        "\r": " ",  # 回车符替换为空格
+        "\x0b": " ",  # 垂直制表符
+        "\x1c": " ",  # 文件分隔符
+        "\x1d": " ",  # 组分隔符
+        "\x1e": " ",  # 记录分隔符
+        "\x1f": " ",  # 单元分隔符
+        "": "",  # 直接移除这个特殊字符
+        "": "",  # 移除其他可能存在的控制字符
+        "": "",
+        "": "",
+        "": ""
+    }
+
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+
+    # 3. 移除不可打印的Unicode字符（如零宽空格等）
+    text = "".join(ch for ch in text if ch.isprintable() or ch == " ")
+
+    # 4. 标准化空格（多个空格变单个）
+    text = " ".join(text.split())
+
+    # 5. 截断过长的文本（Excel单元格限制约32,767个字符）
+    return text[:32000] if len(text) > 32000 else text
 
 
 def convert_excel_to_csv(excel_path, csv_path):
@@ -298,56 +350,188 @@ import numpy as np
 # ... (other functions like load_csv_data remain the same) ...
 
 def auto_categorize(videos, n_categories=400):
-    """强制生成400个视频类别"""
-    print(f"\n开始自动分类 (强制生成{n_categories}个类别)...")
+    """优化版视频分类：支持10万级数据，强制400类，均匀分布"""
+    print(f"\n开始自动分类 (10万级数据优化版，强制{n_categories}类)...")
 
-    # 准备文本数据
+    # ===== 第一阶段：数据预处理 =====
+    print("1. 数据预处理...")
     video_docs = []
     valid_indices = []
+
+    # 使用生成器表达式减少内存占用
     for idx, v in enumerate(videos):
         if v.keywords:
-            doc = ' '.join(v.keywords)
-            if doc:
+            doc = ' '.join(v.keywords[:15])  # 限制关键词数量
+            if doc.strip():
                 video_docs.append(doc)
                 valid_indices.append(idx)
 
-    if not video_docs:
-        print("没有有效关键词的视频")
+    total_videos = len(video_docs)
+    if total_videos == 0:
+        print("警告：没有有效关键词的视频")
         return {}
 
-    # 特征提取
+    # ===== 第二阶段：特征工程 =====
+    print("2. 特征提取 (使用HashingVectorizer避免内存爆炸)...")
     vectorizer = HashingVectorizer(
-        n_features=2 ** 16,
-        ngram_range=(1, 1),
-        alternate_sign=False
+        n_features=2 ** 18,  # 增大特征空间
+        alternate_sign=False,  # 提高稀疏矩阵效率
+        ngram_range=(1, 2),  # 包含二元语法
+        dtype=np.float32  # 减少内存占用
     )
     X = vectorizer.fit_transform(video_docs)
 
-    # 强制400个类别
-    n_clusters = min(n_categories, len(video_docs))
-    if n_clusters < n_categories:
-        print(f"警告: 视频数量不足，实际生成{n_clusters}个类别")
+    # ===== 第三阶段：分层聚类 =====
+    print("3. 分层聚类 (处理大规模数据)...")
 
-    # 聚类
+    # 计算动态类别容量范围
+    avg_size = total_videos / n_categories
+    max_size = int(avg_size * 1.8)  # 上限放宽
+    min_size = int(avg_size * 0.7)  # 下限放宽
+
+    # 使用MiniBatchKMeans进行初始粗分类
+    print(" - 初始粗分类 (50个簇)...")
     mbk = MiniBatchKMeans(
-        n_clusters=n_clusters,
-        batch_size=1024,
+        n_clusters=50,
+        batch_size=5000,
+        compute_labels=True,
         random_state=42
     )
-    clusters = mbk.fit_predict(X)
+    coarse_labels = mbk.fit_predict(X)
 
-    # 分配类别
-    category_map = {i: f"CAT_{i:03d}" for i in range(n_clusters)}
+    # ===== 第四阶段：动态细分类 =====
+    print("4. 动态细分类 (确保400类)...")
+    final_labels = np.zeros(total_videos, dtype=np.int16)
+    current_cat = 0
+    category_sizes = np.zeros(n_categories, dtype=np.int32)
+
+    # 进度条
+    pbar = tqdm(total=50, desc="处理粗分类簇")
+
+    for cluster_id in range(50):
+        # 获取当前粗分类中的视频索引
+        cluster_mask = (coarse_labels == cluster_id)
+        cluster_indices = np.where(cluster_mask)[0]
+        cluster_size = len(cluster_indices)
+
+        if cluster_size == 0:
+            pbar.update(1)
+            continue
+
+        # 计算需要划分的子类数量
+        n_sub_clusters = max(1, min(
+            n_categories - current_cat,
+            int(np.ceil(cluster_size / avg_size))
+        ))
+
+        if n_sub_clusters == 1:
+            # 直接分配类别（带容量检查）
+            for idx in cluster_indices:
+                if category_sizes[current_cat] < max_size:
+                    final_labels[idx] = current_cat
+                    category_sizes[current_cat] += 1
+                else:
+                    current_cat = min(current_cat + 1, n_categories - 1)
+                    final_labels[idx] = current_cat
+                    category_sizes[current_cat] += 1
+        else:
+            # 使用SVD降维后K-means
+            print(f" - 簇{cluster_id} 细分为{n_sub_clusters}类...")
+            sub_X = X[cluster_indices]
+
+            # 使用TruncatedSVD降维
+            svd = TruncatedSVD(n_components=100)
+            reduced_X = svd.fit_transform(sub_X)
+
+            # 细分类
+            sub_kmeans = MiniBatchKMeans(
+                n_clusters=n_sub_clusters,
+                batch_size=2000,
+                random_state=42
+            )
+            sub_labels = sub_kmeans.fit_predict(reduced_X)
+
+            # 分配子类（带容量控制）
+            for sub_id in range(n_sub_clusters):
+                sub_mask = (sub_labels == sub_id)
+                sub_indices = cluster_indices[sub_mask]
+
+                for idx in sub_indices:
+                    if category_sizes[current_cat] < max_size:
+                        final_labels[idx] = current_cat
+                        category_sizes[current_cat] += 1
+                    else:
+                        current_cat = min(current_cat + 1, n_categories - 1)
+                        final_labels[idx] = current_cat
+                        category_sizes[current_cat] += 1
+
+        pbar.update(1)
+    pbar.close()
+
+    # ===== 第五阶段：平衡优化 =====
+    print("5. 平衡优化...")
+
+    # 找出需要调整的类别
+    overfull = np.where(category_sizes > max_size)[0]
+    underfull = np.where(category_sizes < min_size)[0]
+
+    # 使用稀疏矩阵存储类别相似度
+    print(" - 计算类别相似度矩阵...")
+    cat_centroids = np.zeros((n_categories, X.shape[1]))
+    for cat in range(n_categories):
+        cat_mask = (final_labels == cat)
+        if np.sum(cat_mask) > 0:
+            cat_centroids[cat] = X[cat_mask].mean(axis=0)
+
+    # 计算余弦相似度
+    similarity_matrix = cosine_similarity(cat_centroids)
+
+    # 重新分配过大的类别
+    print(" - 重新分配视频...")
+    for src_cat in overfull:
+        # 找到最相似且有容量的目标类别
+        sim_scores = similarity_matrix[src_cat]
+        sorted_cats = np.argsort(-sim_scores)  # 降序排列
+
+        for dst_cat in sorted_cats:
+            if dst_cat == src_cat:
+                continue
+            if category_sizes[dst_cat] < max_size:
+                # 计算可转移数量
+                transfer_num = min(
+                    category_sizes[src_cat] - max_size,
+                    max_size - category_sizes[dst_cat]
+                )
+                if transfer_num <= 0:
+                    continue
+
+                # 转移视频（选择距离目标类别最近的）
+                src_indices = np.where(final_labels == src_cat)[0]
+                src_vectors = X[src_indices]
+
+                dst_centroid = cat_centroids[dst_cat].reshape(1, -1)
+                distances = cosine_similarity(src_vectors, dst_centroid).flatten()
+                closest_indices = np.argsort(distances)[-transfer_num:]
+
+                final_labels[src_indices[closest_indices]] = dst_cat
+                category_sizes[src_cat] -= transfer_num
+                category_sizes[dst_cat] += transfer_num
+                break
+
+    # ===== 第六阶段：结果分配 =====
+    print("6. 分配最终类别...")
+    category_map = {i: f"CAT_{i:03d}" for i in range(n_categories)}
     for i, idx in enumerate(valid_indices):
-        videos[idx].category = category_map[clusters[i]]
+        videos[idx].category = category_map[final_labels[i]]
 
-    # 统计结果
-    category_counts = Counter(v.category for v in videos if v.category)
-    print(f"生成 {len(category_counts)} 个类别")
-    print("类别分布示例:", category_counts.most_common(5))
+    # ===== 统计报告 =====
+    print("\n分类完成！统计信息：")
+    size_stats = pd.Series(category_sizes).describe()
+    print(size_stats)
+    print(f"最大类别大小: {max(category_sizes)}")
+    print(f"最小类别大小: {min(category_sizes)}")
 
-    return category_counts
-
+    return Counter(v.category for v in videos if v.category)
 
 
 # ==================== 行为模拟函数 ====================
@@ -646,146 +830,177 @@ def save_detailed_report(users, videos, filename=OUTPUT_FILENAME):
 # --- Helper functions for creating specific report sheets ---
 
 def _create_category_sheet(wb, videos):
-    ws = wb.active # Get the first sheet
+    ws = wb.active
     ws.title = "分类统计"
-    ws.append(["类别名称", "视频数量"]) # Header row
+    ws.append(["类别名称", "视频数量"])
 
-    # Count videos per category
-    category_counts = Counter(v.category for v in videos if v.category) # Exclude None categories implicitly
-    if not category_counts:
-        ws.append(["N/A", 0])
-        return
+    # 统计并清理类别名称
+    category_counts = Counter()
+    for v in videos:
+        if v.category:
+            clean_category = clean_excel_data(v.category)
+            category_counts[clean_category] += 1
 
-    # Sort categories by count (descending), then name (ascending)
-    sorted_categories = sorted(category_counts.items(), key=lambda item: (-item[1], item[0]))
-
-    for category, count in sorted_categories:
+    # 按数量降序、名称升序排序
+    for category, count in sorted(category_counts.items(), key=lambda item: (-item[1], item[0])):
         ws.append([category, count])
-    # Optional: Add autofilter, adjust column widths
+
+    # 设置列宽
+    ws.column_dimensions['A'].width = 30
+    ws.column_dimensions['B'].width = 15
 
 
 def _create_watch_history_sheet(wb, users):
     ws = wb.create_sheet("观看记录")
 
-    # Generate date headers for the simulated period (e.g., "MM-DD")
+    # 生成日期表头
     base_date = datetime.now().date()
     date_headers = [(base_date - timedelta(days=i)).strftime("%m-%d")
                     for i in range(DAYS_TO_SIMULATE - 1, -1, -1)]
-    ws.append(["用户ID"] + date_headers) # Header row
+    ws.append(["用户ID"] + date_headers)
 
-    # Process each user's watch history
+    # 处理每个用户的观看记录
     for user in users:
-        # Group watched video URLs by day (using the "MM-DD" key)
         daily_watches = defaultdict(list)
         for url, timestamp_str in user.watched_videos:
             try:
                 day_key = datetime.strptime(timestamp_str, '%Y-%m-%d %H:%M:%S').strftime("%m-%d")
-                # Only include watches within the simulated date range
                 if day_key in date_headers:
-                    daily_watches[day_key].append(url)
-            except ValueError:
-                 pass # Ignore malformed timestamps
+                    clean_url = clean_excel_data(url)
+                    daily_watches[day_key].append(clean_url)
+            except (ValueError, KeyError):
+                continue
 
-        # Create the row for the user
-        user_row = [user.user_id]
+        # 构建用户行数据
+        user_row = [clean_excel_data(user.user_id)]
         for day_key in date_headers:
-            # Join URLs with a comma for display in the cell
-            # Limit the number of URLs shown per cell if it gets too long?
             urls_str = ", ".join(daily_watches.get(day_key, []))
-            user_row.append(urls_str)
+            user_row.append(clean_excel_data(urls_str))
         ws.append(user_row)
+
+    # 设置列宽
+    ws.column_dimensions['A'].width = 15
+    for col in range(2, len(date_headers) + 2):
+        ws.column_dimensions[get_column_letter(col)].width = 25
 
 
 def _create_like_history_sheet(wb, users):
     ws = wb.create_sheet("点赞记录")
-    ws.append(["用户ID", "视频URL", "点赞时间"]) # Header row
+    ws.append(["用户ID", "视频URL", "点赞时间"])
 
-    # Iterate through users and their liked videos
     for user in users:
         for url, timestamp_str in user.liked_videos:
-            ws.append([user.user_id, url, timestamp_str])
+            ws.append([
+                clean_excel_data(user.user_id),
+                clean_excel_data(url),
+                clean_excel_data(timestamp_str)
+            ])
+
+    # 设置列宽
+    ws.column_dimensions['A'].width = 15
+    ws.column_dimensions['B'].width = 50
+    ws.column_dimensions['C'].width = 20
 
 
 def _create_video_stats_sheet(wb, videos):
     ws = wb.create_sheet("视频统计")
-    ws.append(["视频URL", "标题", "封面地址", "播放地址", "类别", "观看次数 (独立用户)", "点赞数"]) # Header
+    headers = ["视频URL", "标题", "封面地址", "播放地址", "类别", "观看次数", "点赞数"]
+    ws.append(headers)
 
-    # Sort videos by URL for consistent order (optional)
+    # 按URL排序视频
     sorted_videos = sorted([v for v in videos if v.url != "N/A"], key=lambda v: v.url)
 
     for video in sorted_videos:
         ws.append([
-            video.url,
-            video.title or "", # Handle None title
-            video.cover_url or "", # Handle None URLs
-            video.play_url or "",
-            video.category or "N/A", # Handle None category
-            len(video.viewers), # Unique viewer count
+            clean_excel_data(video.url),
+            clean_excel_data(video.title),
+            clean_excel_data(video.cover_url),
+            clean_excel_data(video.play_url),
+            clean_excel_data(video.category),
+            len(video.viewers),
             video.like_count
         ])
 
+    # 设置列宽
+    column_widths = [50, 40, 40, 40, 30, 15, 15]
+    for i, width in enumerate(column_widths, 1):
+        ws.column_dimensions[get_column_letter(i)].width = width
 
-def _create_daily_views_sheet(wb, videos, daily_views_data): # Pass pre-calculated data
+
+def _create_daily_views_sheet(wb, videos, daily_views_data):
     ws = wb.create_sheet("每日观看")
 
-    # Get sorted date headers from the data structure keys (if needed, assume consistent order)
-    if not daily_views_data: # Handle case where calculation failed or no data
+    if not daily_views_data:
         ws.append(["视频URL", "无数据"])
         return
 
-    # Assuming daily_views_data has URLs as keys and dicts {date: count} as values
-    # Get a sample URL to extract the date keys in order
+    # 获取排序后的日期
     sample_url = next(iter(daily_views_data), None)
     if not sample_url:
         ws.append(["视频URL", "无数据"])
         return
-    dates = sorted(daily_views_data[sample_url].keys()) # Get dates and sort them
 
-    ws.append(["视频URL"] + dates) # Header row
+    dates = sorted(daily_views_data[sample_url].keys())
+    ws.append(["视频URL"] + dates)
 
-    # Sort videos by URL for consistent row order
+    # 按URL排序视频
     sorted_video_urls = sorted([v.url for v in videos if v.url != "N/A" and v.url in daily_views_data])
 
     for url in sorted_video_urls:
-        row_data = [url]
-        # Append counts for each date, defaulting to 0 if somehow missing
+        row_data = [clean_excel_data(url)]
         row_data.extend([daily_views_data[url].get(date, 0) for date in dates])
         ws.append(row_data)
 
+    # 设置列宽
+    ws.column_dimensions['A'].width = 50
+    for col in range(2, len(dates) + 2):
+        ws.column_dimensions[get_column_letter(col)].width = 12
 
-def _create_hot_ranking_sheet(wb, videos, ranking_data): # Pass pre-calculated data
+
+def _create_hot_ranking_sheet(wb, videos, ranking_data):
     ws = wb.create_sheet("热门排行")
 
-    if not ranking_data: # Handle case where ranking failed or no data
-        ws.append(["排名", "视频URL", "封面地址", "播放地址", "类别", "观看数 (独立用户)", "点赞数", "热度评分", "无数据"])
+    if not ranking_data:
+        # Adjust header slightly for consistency if no data
+        headers = ["排名", "视频URL", "标题", "封面地址", "播放地址", "类别",
+                   "观看数 (独立用户)", "点赞数", "热度评分", "无数据"] # Corrected header name
+        ws.append(headers)
         return
 
-    # Headers based on keys in the ranking_data dictionary
-    headers = list(ranking_data[0].keys()) # Get headers from the first item
-     # Add columns that require lookup from the 'videos' list
-    headers.insert(2, "标题")
-    headers.insert(3, "封面地址")
-    headers.insert(4, "播放地址")
+    # 准备表头 - Use the correct key name here
+    headers = ["排名", "视频URL", "标题", "封面地址", "播放地址", "类别",
+               "观看数 (独立用户)", "点赞数", "热度评分"] # Corrected header name
     ws.append(headers)
 
-    # Create a quick lookup dictionary for video objects by URL
+    # 创建视频URL到视频对象的映射
     video_dict = {v.url: v for v in videos if v.url != "N/A"}
 
-    # Add data rows
     for item in ranking_data:
-        video = video_dict.get(item["视频URL"]) # Find the corresponding Video object
+        video = video_dict.get(item["视频URL"])
         row_data = [
             item["排名"],
-            item["视频URL"],
-            video.title if video else "",       # Add Title
-            video.cover_url if video else "",   # Add Cover URL
-            video.play_url if video else "",    # Add Play URL
-            item["类别"],
-            item["观看数 (独立用户)"], # Use the header name from ranking data
-            item["点赞数"],
-            item["热度评分"]
+            clean_excel_data(item["视频URL"]),
+            clean_excel_data(video.title) if video else "",
+            clean_excel_data(video.cover_url) if video else "",
+            clean_excel_data(video.play_url) if video else "",
+            clean_excel_data(item["类别"]),
+            item["观看数 (独立用户)"], # <--- Use the correct key from ranking_data
+            item["点赞数"], # This key should be correct
+            item["热度评分"] # This key should be correct
         ]
         ws.append(row_data)
+
+    # 设置列宽 - Adjust width for the potentially longer header
+    # Indices: 1   2   3   4   5   6   7                    8    9
+    column_widths = [8, 50, 40, 40, 40, 30, 20,               12,  12] # Increased width for "观看数 (独立用户)"
+    for i, width in enumerate(column_widths, 1):
+        ws.column_dimensions[get_column_letter(i)].width = width
+
+
+    # 设置列宽
+    column_widths = [8, 50, 40, 40, 40, 30, 12, 12, 12]
+    for i, width in enumerate(column_widths, 1):
+        ws.column_dimensions[get_column_letter(i)].width = width
 
 
 # ==================== 主程序 ====================
@@ -933,9 +1148,6 @@ if __name__ == "__main__":
         # === Step 7: Advanced Clustering Analysis ===
         print(f"\n--- [步骤 7] 高级聚类分析 ---")
 
-        # === Step 7: Advanced Clustering Analysis ===
-        print(f"\n--- [步骤 7] 高级聚类分析 ---")
-
         # F6: 视频聚类分析 (*** 这是修改的核心区域 ***)
         try:
             # 记录开始时间
@@ -1046,7 +1258,64 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"用户聚类失败: {str(e)}")
 
+            # === Example Usage of New Functions ===
+        print("\n--- [步骤 8] API 函数示例调用 ---")
+
+        if users and videos:  # Check if data exists
+                # Example 1: Get watched history for user index 5
+                target_user_idx = 5
+                print(f"\n获取用户索引 {target_user_idx} 的观看历史:")
+                watched_history_json = user_center.get_user_history(target_user_idx, users, videos, history_type='watched')
+                print(watched_history_json)
+
+                # Example 2: Get liked history for user index 10
+                target_user_idx = 10
+                print(f"\n获取用户索引 {target_user_idx} 的点赞历史:")
+                liked_history_json = user_center.get_user_history(target_user_idx, users, videos, history_type='liked')
+                print(liked_history_json)
+
+                # Example 3: Get similar users for user index 5 (requires user_clusters_result_df)
+                if user_clusters is not None:
+                    target_user_idx = 5
+                    print(f"\n获取与用户索引 {target_user_idx} 相似的用户 (Top 5):")
+                    similar_users_json = user_center.get_similar_users(target_user_idx, users, user_clusters, top_n=5)
+                    print(similar_users_json)
+                else:
+                    print("\n无法获取相似用户，因为用户聚类数据不可用。")
+
+        else:
+                print("\n无法执行示例调用，因为用户或视频数据未加载。")
+
         print("\n高级聚类分析完成!")
+
+        if 'videos' in locals() and videos:
+            print("\n--- [新增] API 函数调用测试 ---")
+
+            test_play_index = 15
+            print(f"\n[测试] 获取视频索引 {test_play_index} 的播放信息:")
+            play_info_json = videos_playing.play_video(test_play_index, videos)
+            print(play_info_json)
+
+            test_play_invalid_index = -1
+            print(f"\n[测试] 获取视频索引 {test_play_invalid_index} 的播放信息 (无效索引):")
+            play_info_json_invalid = videos_playing.play_video(test_play_invalid_index, videos)
+            print(play_info_json_invalid)
+
+            test_similar_index = 30
+            num_to_find = 5
+            print(f"\n[测试] 获取与视频索引 {test_similar_index} 相似的 {num_to_find} 个视频:")
+            similar_videos_json = videos_playing.get_similar_videos(test_similar_index, videos, num_similar=num_to_find)
+            print(similar_videos_json)
+
+            num_to_find_small = 3
+            print(f"\n[测试] 获取与视频索引 {test_similar_index} 相似的 {num_to_find_small} 个视频:")
+            similar_videos_json_small = videos_playing.get_similar_videos(test_similar_index, videos, num_similar=num_to_find_small)
+            print(similar_videos_json_small)
+
+
+
+        else:
+            print("\n错误：全局变量 'videos' 不存在或为空，无法执行 API 函数测试。")
     except FileNotFoundError as fnf:
         print(f"错误：找不到所需文件! {fnf}")
         print("请确认所有输入文件路径正确，或检查相关目录权限。")
