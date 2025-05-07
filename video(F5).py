@@ -5,6 +5,7 @@ import logging
 from datetime import datetime, timedelta
 from statsmodels.tsa.arima.model import ARIMA
 from sklearn.linear_model import LinearRegression
+import json
 
 # 配置日志
 logging.basicConfig(
@@ -45,6 +46,21 @@ def load_daily_views(file_path, target_url=None):
         if not date_cols:
             raise ValueError("未找到有效的日期列")
         
+        merge_df = pd.read_csv(
+        'merge.csv', 
+        usecols=["video_url", "title","id"],
+        dtype={'video_url': 'string', 'title': 'string','id':'int'},
+        encoding='utf-8'
+        )
+    #4.合并数据
+        df = df.merge(
+                merge_df,
+                left_on='视频URL',
+                right_on='video_url',
+                how='left'
+            )
+        df['title'] = df['title'].fillna('未知标题')
+
         # 如果指定了目标URL
         if target_url:
             if target_url not in df['视频URL'].values:
@@ -154,7 +170,7 @@ def _format_forecast(values, historical_data):
 def main():
     # 配置参数
     input_file = "user_behavior_7days.xlsx"
-    target_url = "https://www.kuaishou.com/short-video/3x8pp3ssxjjatnw"  # 替换为实际URL
+    target_url = "https://www.kuaishou.com/short-video/3x8pp3ssxjjatnw"
     
     # 1. 直接加载日观看数据
     daily_views = load_daily_views(input_file, target_url)
@@ -164,12 +180,16 @@ def main():
     # 2. 执行预测
     forecast = hybrid_forecast(daily_views)
     
-    # 3. 输出结果
-    print("\n=== 历史数据 ===")
-    print(daily_views.to_string())
+    #3.转换
+    result = {
+        "heatCurve": [
+            {"time": date.strftime("%Y-%m-%d"), "views": int(views)}
+            for date, views in forecast.items()
+        ]
+    }
     
-    print("\n=== 未来7天预测 ===")
-    print(forecast.to_string())
+    # 4. 输出JSON结果
+    print(json.dumps(result, ensure_ascii=False, indent=2))
     
 
 if __name__ == "__main__":
