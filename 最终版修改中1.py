@@ -25,6 +25,7 @@ from datetime import datetime, timedelta
 from collections import defaultdict, Counter
 import json
 from openpyxl.utils import get_column_letter
+from openpyxl.utils.dataframe import dataframe_to_rows
 from sklearn.cluster import DBSCAN
 from sklearn.preprocessing import StandardScaler
 # Make sure openpyxl is installed if you intend to use convert_excel_to_csv
@@ -60,34 +61,25 @@ except ImportError as e:
     # sys.exit(1) # Optional: Exit if modules are critical
 
 # ==================== 全局配置 ====================
-NUM_USERS = 1000
+NUM_USERS = 10000
 MIN_INTERESTS = 4
 MAX_INTERESTS = 6
 OUTPUT_FILENAME = "user_behavior_7days.xlsx"
 DAYS_TO_SIMULATE = 7
 # Define source Excel and target CSV paths clearly
-SOURCE_EXCEL_PATH = "D:/Desktop/数据结构大作业/数据3.xlsx"
-TARGET_CSV_PATH = "D:/Desktop/数据结构大作业/数据3.csv"
+SOURCE_EXCEL_PATH = "D:/Desktop/数据结构大作业/merge(4).xlsx"
+TARGET_CSV_PATH = "D:/Desktop/数据结构大作业/merge(4).csv"
 
 
 def clean_excel_data(text):
-    """
-    彻底清理数据中所有可能引起Excel问题的特殊字符
-    参数:
-        text: 要清理的文本（可以是任何类型）
-    返回:
-        完全清理后的安全字符串
-    """
     if text is None:
         return ""
 
-    # 转换为字符串
+    #转换为字符串
     text = str(text)
-
-    # 1. 移除所有控制字符（ASCII 0-31，除了\t,\n,\r）
+    #移除所有控制字符（ASCII 0-31，除了\t,\n,\r）
     text = "".join(ch for ch in text if ord(ch) >= 32 or ch in ("\t", "\n", "\r"))
-
-    # 2. 替换特定特殊字符
+    #替换特定特殊字符
     replacements = {
         "|": "-",
         "\t": " ",  # 制表符替换为空格
@@ -104,17 +96,13 @@ def clean_excel_data(text):
         "": "",
         "": ""
     }
-
     for old, new in replacements.items():
         text = text.replace(old, new)
-
-    # 3. 移除不可打印的Unicode字符（如零宽空格等）
+    #移除不可打印的Unicode字符（如零宽空格等）
     text = "".join(ch for ch in text if ch.isprintable() or ch == " ")
-
-    # 4. 标准化空格（多个空格变单个）
+    #标准化空格（多个空格变单个）
     text = " ".join(text.split())
-
-    # 5. 截断过长的文本（Excel单元格限制约32,767个字符）
+    #截断过长的文本（Excel单元格限制约32,767个字符）
     return text[:32000] if len(text) > 32000 else text
 
 
@@ -123,20 +111,16 @@ def convert_excel_to_csv(excel_path, csv_path):
     try:
         import pandas as pd
         print(f"开始将 '{os.path.basename(excel_path)}' 转换为CSV...")
-
         # 直接使用单次读取方式 (不使用chunksize参数)
         print("读取Excel文件 (可能需要一些时间)...")
         df = pd.read_excel(excel_path, engine='openpyxl')
         total_converted = len(df)
-
         # 分批写入CSV以减少内存使用
         print(f"总共 {total_converted} 行数据，开始分批写入CSV...")
         chunk_size = 50000
-
         with open(csv_path, 'w', encoding='utf-8', newline='') as f:
             # 写入标题行
             df.head(0).to_csv(f, index=False, header=True)
-
             # 分批写入数据
             for i in range(0, len(df), chunk_size):
                 chunk_end = min(i + chunk_size, len(df))
@@ -146,14 +130,11 @@ def convert_excel_to_csv(excel_path, csv_path):
                 # 释放内存
                 del chunk
                 gc.collect()
-
         # 释放内存
         del df
         gc.collect()
-
         print(f"转换完成！共 {total_converted} 行数据。CSV文件保存于：{csv_path}")
         return True
-
     except ImportError:
         print("错误：需要安装 'pandas' 和 'openpyxl' 库才能转换Excel。请运行 'pip install pandas openpyxl'")
         return False
@@ -175,10 +156,11 @@ def convert_excel_to_csv(excel_path, csv_path):
 # ==================== 核心类定义 ====================
 class Video:
     """优化内存的视频类"""
-    __slots__ = ['url', 'keywords', 'category', 'title', 'like_count',
+    __slots__ = ['id','url', 'keywords', 'category', 'title', 'like_count',
                  'cover_url', 'play_url', 'viewers', 'liked_users']
 
-    def __init__(self, url, keywords, title=None, cover_url=None, play_url=None): # 添加了 title 参数
+    def __init__(self, video_id,url, keywords, title=None, cover_url=None, play_url=None): # 添加了 title 参数
+        self.id = str(video_id).strip() if video_id is not None else "N/A_ID"  # 确保是字符串并处理 None
         self.url = url.strip() if url else "N/A"  # 处理可能为 None 的 URL
         # 优雅地处理可能为 NaN 或 None 的关键词
         keywords_str = str(keywords) if keywords is not None else ""
@@ -232,113 +214,126 @@ class User:
         return {cat: random.uniform(0.7, 1.0) for cat in chosen_cats}
 
 
-# ==================== 数据处理函数 ====================
+# --- 修改 load_csv_data 函数 ---
 def load_csv_data(file_path):
-    """从CSV加载视频数据（支持大数据量，优化内存）"""
+    """从CSV加载视频数据（支持大数据量，优化内存），包含视频ID (列名为 'id')"""
     try:
-        import pandas as pd
-        print(f"开始从 '{os.path.basename(file_path)}' 加载视频数据...")
+        import pandas as pd # 保留 import
+        print(f"开始从 '{os.path.basename(file_path)}' 加载视频数据 (ID列名为 'id')...")
 
-        # Define expected columns - adjust if your CSV has different names
-        required_cols = ['video_url', 'source_keyword']
+        # --- 修改：将 'video_id' 改为 'id' ---
+        required_cols = ['id', 'video_url', 'source_keyword']
         optional_cols = ['title', 'video_cover_url', 'video_play_url']
+        # use_cols 会自动更新，因为它依赖 required_cols
         use_cols = required_cols + optional_cols
 
-        # Check header first to ensure required columns exist
+        # 检查文件头
         try:
             header = pd.read_csv(file_path, nrows=0, encoding='utf-8').columns.tolist()
             missing_required = [col for col in required_cols if col not in header]
             if missing_required:
-                raise ValueError(f"CSV文件 '{file_path}' 缺少必需的列: {', '.join(missing_required)}")
-            # Determine which optional columns are actually present
+                # --- 修改：更新了错误信息中的列名 ---
+                raise ValueError(f"CSV文件 '{file_path}' 缺少必需的列: {', '.join(missing_required)}。请确保包含 'id', 'video_url', 'source_keyword' 列。")
             actual_use_cols = [col for col in use_cols if col in header]
             print(f"将加载以下列: {', '.join(actual_use_cols)}")
         except Exception as e:
              raise ValueError(f"无法读取CSV文件头 '{file_path}': {e}")
 
-
-        # Configure types for memory efficiency - use 'category' for low-cardinality strings if appropriate
-        # Using 'object' or default string type is safer if cardinality is high or unknown
+        # 配置数据类型
+        # --- 修改：将 dtype_config 中的键 'video_id' 改为 'id' ---
         dtype_config = {
-            'video_url': 'object', # URLs are usually unique, 'category' might not save memory
-            'source_keyword': 'object', # Keywords can be diverse
+            'id': 'object', # CSV 列名为 'id'
+            'video_url': 'object',
+            'source_keyword': 'object',
             'title': 'object',
             'video_cover_url': 'object',
             'video_play_url': 'object'
         }
-        # Apply dtype only to columns that exist
         effective_dtype = {k: v for k, v in dtype_config.items() if k in actual_use_cols}
 
-
-        # Estimate total rows for progress bar (more robust method)
+        # 估算总行数 (逻辑不变)
         total_rows = 0
         try:
             with open(file_path, 'r', encoding='utf-8') as f:
-                # Use a generator to avoid loading the whole file into memory
-                total_rows = sum(1 for row in f) -1 # Subtract header row
-            if total_rows < 0: total_rows = 0 # Handle empty file case
+                total_rows = sum(1 for row in f) -1
+            if total_rows < 0: total_rows = 0
         except Exception as e:
             print(f"警告：无法准确计算行数，进度条可能不准确。错误: {e}")
-            total_rows = None # Indicate unknown total
+            total_rows = None
 
         videos = []
         seen_urls = set()
+        seen_ids = set() # Optional: Track seen IDs as well
         processed_rows = 0
-        chunksize = 10000 # Process in chunks
+        chunksize = 10000
 
-        # Use context manager for file handling if not using pandas iterator directly
-        # Setup progress bar
         pbar = tqdm(total=total_rows, desc="加载CSV数据", unit="rows", disable=(total_rows is None))
 
-        # Read CSV in chunks
         for chunk in pd.read_csv(
                 file_path,
                 chunksize=chunksize,
-                dtype=effective_dtype, # Use effective dtypes
-                usecols=actual_use_cols, # Load only existing relevant columns
+                dtype=effective_dtype,
+                usecols=actual_use_cols,
                 encoding='utf-8',
-                on_bad_lines='warn' # Action for rows with too many fields
+                on_bad_lines='warn'
         ):
-            # Data Cleaning within the chunk
-            # 1. Drop rows where essential columns (URL, keywords) are missing
-            chunk.dropna(subset=['video_url', 'source_keyword'], inplace=True)
-            # 2. Drop duplicates based on 'video_url' within the chunk
+            # 数据清理
+            # --- 修改：在 dropna 的 subset 中将 'video_id' 改为 'id' ---
+            chunk.dropna(subset=['id', 'video_url', 'source_keyword'], inplace=True)
+            # --- 修改：更新关于基于 ID 去重的注释 (如果需要) ---
+            # 当前仍基于 URL 去重。
             chunk.drop_duplicates(subset='video_url', keep='first', inplace=True)
+            # 如果需要基于 'id' 列去重，使用下面这行:
+            # chunk.drop_duplicates(subset='id', keep='first', inplace=True)
 
-            # Convert chunk rows to Video objects
+            # 转换为 Video 对象
             for _, row in chunk.iterrows():
-                url = str(row['video_url']).strip() # Ensure URL is string and stripped
-                # Check if URL has already been seen across chunks
+                url = str(row['video_url']).strip()
+                # --- 修改：从 row['id'] 获取 ID 值 ---
+                video_id_from_csv = str(row['id']).strip() # 从 'id' 列读取
+
+                # 基于 URL 的唯一性检查 (保持不变)
                 if url and url not in seen_urls:
                     seen_urls.add(url)
+                    # Optional: Add ID check using video_id_from_csv
+                    # if video_id_from_csv in seen_ids:
+                    #     print(f"警告：发现重复的 ID '{video_id_from_csv}' 对应不同的 URL '{url}'. 已跳过.")
+                    #     continue
+                    # seen_ids.add(video_id_from_csv)
+
+                    # --- 修改：将从 'id' 列读取的值传递给 Video 构造函数的 video_id 参数 ---
                     videos.append(Video(
+                        video_id=video_id_from_csv, # 将 CSV 的 'id' 列的值传给构造函数的 video_id 参数
                         url=url,
-                        keywords=row['source_keyword'], # Keywords handled in Video.__init__
-                        title=row.get('title'), # Use .get for optional columns
+                        keywords=row['source_keyword'],
+                        title=row.get('title'),
                         cover_url=row.get('video_cover_url'),
                         play_url=row.get('video_play_url')
                     ))
 
             processed_rows += len(chunk)
             if total_rows is not None:
-                pbar.update(len(chunk)) # Update progress bar accurately
+                pbar.update(len(chunk))
             else:
-                pbar.set_description(f"加载CSV数据 (已处理 {processed_rows} 行)") # Update description if total unknown
-            gc.collect() # Garbage collect after each chunk
+                pbar.set_description(f"加载CSV数据 (已处理 {processed_rows} 行)")
+            gc.collect()
 
         pbar.close()
         if not videos:
-             print(f"\n警告：从 '{file_path}' 加载了 0 个有效视频。请检查CSV文件内容和格式。")
+             # --- 修改：更新了警告信息中的列名 ---
+             print(f"\n警告：从 '{file_path}' 加载了 0 个有效视频。请检查CSV文件内容、格式和必需列 ('id', 'video_url', 'source_keyword')。")
         else:
-             print(f"\n成功加载 {len(videos)} 个唯一视频（内存优化版）")
+             # 成功信息保持不变，因为它描述的是概念上的 ID
+             print(f"\n成功加载 {len(videos)} 个唯一视频（含视频ID，内存优化版）")
         return videos
 
     except FileNotFoundError:
         raise FileNotFoundError(f"错误：CSV 数据文件未找到 '{file_path}'")
-    except ValueError as ve: # Catch specific ValueErrors raised earlier
+    except ValueError as ve:
          raise ve
     except Exception as e:
-        raise RuntimeError(f"加载 CSV 数据时发生意外错误: {str(e)}")
+        raise RuntimeError(f"加载 CSV 数据时发生意外错误: {e.__class__.__name__} - {str(e)}") from e
+
 
 
 from sklearn.cluster import KMeans
@@ -588,7 +583,7 @@ def simulate_behavior(users, videos):
 
         for day in date_range:
             # Simulate 1 to 3 sessions per day
-            for _ in range(random.randint(1, 3)):
+            for _ in range(random.randint(1, 2)):
                 # Random time within the day (e.g., 8 AM to 11 PM)
                 session_base_time = datetime.combine(day, datetime.min.time())
                 session_time = session_base_time.replace(
@@ -598,7 +593,7 @@ def simulate_behavior(users, videos):
                 )
 
                 # Simulate 10 to 30 actions (watches/likes) per session
-                for _ in range(random.randint(30, 40)):
+                for _ in range(random.randint(13, 15)):
                     chosen_video = None
                     # Decide whether to watch based on interest (90% chance) or explore randomly (10%)
                     if user_interest_categories and random.random() < 0.9:
@@ -1003,16 +998,133 @@ def _create_hot_ranking_sheet(wb, videos, ranking_data):
         ws.column_dimensions[get_column_letter(i)].width = width
 
 
+import pandas as pd
+
+
+def save_videos_to_csv(videos, output_csv_file):
+    """
+    将视频数据保存到 CSV 文件。
+
+    Args:
+        videos (list): 包含 Video 对象的列表。
+        output_csv_file (str): 输出 CSV 文件的路径。
+    """
+    # 先提取视频对象的相关数据
+    video_data = []
+    for video in videos:
+        video_data.append({
+            "视频ID": video.id,
+            "视频URL": video.url,
+            "关键词": " ".join(video.keywords),  # 将关键词转为字符串
+            "类别": video.category,
+            "标题": video.title,
+            "点赞数": video.like_count,
+            "封面URL": video.cover_url,
+            "播放URL": video.play_url,
+            "观看者数": len(video.viewers),  # 观看者数
+            "点赞用户数": len(video.liked_users),  # 点赞用户数
+        })
+
+    # 创建 DataFrame
+    df = pd.DataFrame(video_data)
+
+    # 保存为 CSV 文件
+    try:
+        df.to_csv(output_csv_file, index=False, encoding='utf-8-sig')  # 使用 utf-8-sig 编码确保支持中文
+        print(f"视频数据已成功保存到 {output_csv_file}")
+    except Exception as e:
+        print(f"保存视频数据到 CSV 时发生错误: {e}")
+
+
+import pandas as pd
+
+
+def save_users_to_csv(users, output_filename="users_output.csv"):
+    """将用户信息保存到CSV文件"""
+
+    # 生成用户信息的列表 (可以包含用户 ID 和兴趣等字段)
+    users_data = []
+    for user in users:
+        user_info = {
+            "用户ID": user.user_id,
+            "兴趣类别": ", ".join(user.interests.keys()),  # 假设兴趣类别是一个字典
+            "观看视频数": len(user.watched_videos),
+            "点赞视频数": len(user.liked_videos)
+        }
+        users_data.append(user_info)
+
+    # 创建 DataFrame
+    df = pd.DataFrame(users_data)
+
+    # 保存到 CSV 文件
+    try:
+        df.to_csv(output_filename, index=False, encoding='utf-8-sig')  # 使用 utf-8-sig 编码确保中文支持
+        print(f"用户信息已成功保存到 '{output_filename}'")
+    except Exception as e:
+        print(f"保存用户信息到CSV时发生错误: {e}")
+
+
+def load_clusters_from_excel_with_dtypes(excel_filepath, sheet_name, expected_dtypes=None):
+    """
+    从 Excel 文件加载指定工作表的数据到 Pandas DataFrame。
+    如果提供了 expected_dtypes，则会尝试在加载时应用这些数据类型。
+
+    参数:
+        excel_filepath (str): Excel 文件的路径。
+        sheet_name (str): 要读取的工作表的名称。
+        expected_dtypes (dict, optional): 一个字典，键是列名，值是该列期望的 pandas/numpy 数据类型。
+                                          例如: {'聚类ID': 'int64', '视频URL': 'object'}
+                                          如果为 None，pandas 将自动推断数据类型。
+
+    返回:
+        pd.DataFrame: 加载后的 DataFrame。如果文件未找到或加载失败，则返回一个空的 DataFrame。
+    """
+    if not os.path.exists(excel_filepath):
+        print(f"错误：Excel文件 '{excel_filepath}' 未找到。")
+        return pd.DataFrame()
+
+    try:
+        print(f"正在从 Excel 文件 '{excel_filepath}' 的工作表 '{sheet_name}' 加载数据...")
+        if expected_dtypes:
+            print(f"  尝试使用预定义的数据类型: {expected_dtypes}")
+            # 使用 dtype 参数来指定列的数据类型
+            # 对于 .xlsx 文件，默认引擎通常是 'openpyxl'，确保已安装 (pip install openpyxl)
+            reloaded_df = pd.read_excel(excel_filepath, sheet_name=sheet_name, dtype=expected_dtypes)
+        else:
+            print("  将由 pandas 自动推断数据类型。")
+            reloaded_df = pd.read_excel(excel_filepath, sheet_name=sheet_name)
+
+        print(f"成功从Excel加载 {len(reloaded_df)} 条记录。")
+        print("加载后的DataFrame信息 (包含数据类型):")
+        reloaded_df.info() # .info() 会显示每列的数据类型
+        return reloaded_df
+    except FileNotFoundError:
+        print(f"错误：Excel文件 '{excel_filepath}' 未找到（在尝试读取时）。")
+        return pd.DataFrame()
+    except ValueError as ve: # 通常是 sheet_name 找不到
+        print(f"从Excel文件 '{excel_filepath}' 加载数据时发生值错误: {ve}")
+        print(f"  请确保工作表名称 '{sheet_name}' 正确无误。")
+        return pd.DataFrame()
+    except Exception as e:
+        print(f"从Excel文件 '{excel_filepath}' 的工作表 '{sheet_name}' 加载数据时发生其他错误: {e}")
+        return pd.DataFrame()
 # ==================== 主程序 ====================
 if __name__ == "__main__":
     main_start_time = time.time()
     print("=============================================")
-    print("=== 视频用户行为模拟系统 - V2.0 (CSV Based) ===")
+    print("=== 视频用户行为模拟系统 - V2.1 (ID Based) ===") # Version bump
     print("=============================================")
 
+    # --- 定义变量以存储中间结果 ---
+    videos = []
+    users = []
+    video_clusters = pd.DataFrame() # Initialize as empty DataFrame
+    user_clusters = pd.DataFrame()  # Initialize as empty DataFrame
+
     try:
-        # === Step 0: Prepare Data Source (Convert Excel to CSV if needed) ===
+        # === Step 0: Prepare Data Source ===
         print(f"\n--- [步骤 0] 数据源准备 ---")
+        # ... (逻辑保持不变) ...
         print(f"源 Excel: {SOURCE_EXCEL_PATH}")
         print(f"目标 CSV: {TARGET_CSV_PATH}")
 
@@ -1029,52 +1141,43 @@ if __name__ == "__main__":
                 print(f"Excel成功转换为CSV。")
                 csv_ready = True
             else:
-                # Conversion failed, error message already printed by the function
-                raise RuntimeError("Excel到CSV转换失败，无法继续。") # Raise a generic runtime error
+                raise RuntimeError("Excel到CSV转换失败，无法继续。")
 
         if not csv_ready:
-             # This should ideally not be reached if exceptions are raised correctly
              print("错误：未能准备好CSV数据文件，程序终止。")
              sys.exit(1)
 
-
         # === Step 1: Load Data from CSV ===
         print(f"\n--- [步骤 1] 加载视频数据 ---")
-        videos = load_csv_data(TARGET_CSV_PATH)
+        videos = load_csv_data(TARGET_CSV_PATH) # 确保加载函数处理ID
         if not videos:
              print("错误：未能从CSV加载任何视频数据，程序终止。")
              sys.exit(1)
-        print(f"成功加载 {len(videos)} 个视频。")
-
+        # print(f"成功加载 {len(videos)} 个视频。") # Message now printed inside load_csv_data
 
         # === Step 2: Categorize Videos ===
         print(f"\n--- [步骤 2] 视频分类 ---")
-        # Option A: Try recovery first
+        # ... (分类恢复和自动分类逻辑保持不变) ...
         print("尝试从之前的报告文件中恢复分类信息...")
         report_files_to_check = [
             OUTPUT_FILENAME, # Main report file
             "video_clusters.xlsx", # Video clustering report might have categories
-            # Add other potential report filenames here
+            "video_clusters_optimized_balanced.xlsx" # Add the new optimized filename
         ]
-        # Ensure category_recovery module and function exist and work as expected
         try:
              categories_recovered, videos_updated_count = category_recovery.recover_categories(videos, report_files_to_check)
              print(f"分类恢复尝试完成。更新了 {videos_updated_count} 个视频的分类。")
         except NameError:
              print("警告：`category_recovery` 模块或功能未找到，跳过分类恢复。")
-             categories_recovered = None
-             videos_updated_count = 0
+             categories_recovered = None; videos_updated_count = 0
         except Exception as rec_err:
              print(f"警告：在恢复分类时发生错误: {rec_err}。跳过恢复。")
-             categories_recovered = None
-             videos_updated_count = 0
+             categories_recovered = None; videos_updated_count = 0
 
-
-        # Option B: If recovery didn't cover enough, or failed, run auto-categorization
-        # Define "enough": e.g., if less than 70% of videos have a category assigned
-        categories_assigned_count = sum(1 for v in videos if v.category is not None and v.category != "N/A")
+        categories_assigned_count = sum(1 for v in videos if hasattr(v, 'category') and v.category is not None and v.category not in ["N/A", ""])
         needs_auto_categorize = True
-        if categories_assigned_count >= len(videos) * 0.7:  # Threshold can be adjusted
+        # Adjust threshold or logic if needed
+        if categories_assigned_count >= len(videos) * 0.7:
             print(f"已成功恢复或分配分类给 {categories_assigned_count}/{len(videos)} 个视频。跳过自动分类。")
             needs_auto_categorize = False
         else:
@@ -1083,34 +1186,27 @@ if __name__ == "__main__":
 
         category_counts_result = {}
         if needs_auto_categorize:
-            # 调用更新后的 auto_categorize
-            category_counts_result = auto_categorize(videos)
+            category_counts_result = auto_categorize(videos, n_categories=400) # Ensure n_categories is passed if needed by the func
 
         # 准备用于用户兴趣生成的有效类别列表
-        all_assigned_categories = set(v.category for v in videos if v.category)
-        # 过滤掉通用/错误/非聚类类别
+        all_assigned_categories = set(v.category for v in videos if hasattr(v, 'category') and v.category)
         valid_categories_for_interests = [
             cat for cat in all_assigned_categories
-            if
-            cat not in ["No Keywords", "Other", "Clustering Error", "Single Cluster", "N/A", None] and cat.startswith(
-                "CAT_")  # 确保只用 CAT_XXX 类别
+            if cat and cat not in ["No Keywords", "Other", "Clustering Error", "Single Cluster", "N/A", None] and str(cat).startswith("CAT_")
         ]
         if not valid_categories_for_interests and category_counts_result:
-            # 后备方案: 如果集合逻辑失败，直接从结果中使用生成的 CAT_ 名称
-            valid_categories_for_interests = [cat for cat in category_counts_result if cat.startswith("CAT_")]
+            valid_categories_for_interests = [cat for cat in category_counts_result if str(cat).startswith("CAT_")]
 
         if not valid_categories_for_interests:
-            print("警告：分类后未找到有效的 'CAT_XXX' 簇类别。用户兴趣可能受限。")
-            # 如果绝对必要，可以提供一个默认值，尽管 User 类有自己的默认值
-            # valid_categories_for_interests = ['Default Cluster']
+            print("警告：分类后未找到有效的 'CAT_XXX' 簇类别。用户兴趣将基于 '默认类别'。")
+            # User class handles the default, no need to set it here unless overriding
 
         print(f"用于用户兴趣生成的有效类别数量: {len(valid_categories_for_interests)}")
-        # print(f"有效类别示例: {valid_categories_for_interests[:10]}") # 可选：打印示例类别
 
-        # === Step 3: Generate Users (生成用户) ===
-        print(f"\n--- [Step 3] Generate Simulated Users ---")
+
+        # === Step 3: Generate Users ===
+        print(f"\n--- [步骤 3] 生成模拟用户 ---")
         print(f"创建 {NUM_USERS} 个模拟用户...")
-        # 将过滤后的有效类别列表传递给 User 构造函数
         users = [User(i, valid_categories_for_interests) for i in range(NUM_USERS)]
         print(f"成功创建 {len(users)} 个用户。")
 
@@ -1118,14 +1214,14 @@ if __name__ == "__main__":
         # === Step 4: Simulate User Behavior ===
         print(f"\n--- [步骤 4] 模拟用户行为 ---")
         simulate_behavior(users, videos)
-        # (Validation check is now inside simulate_behavior or done implicitly)
 
 
-        # === Step 5: Data Validation (Post-Simulation) ===
+        # === Step 5: Data Validation ===
         print(f"\n--- [步骤 5] 数据验证 ---")
+        # ... (逻辑保持不变) ...
         total_watches_recorded = sum(len(u.watched_videos) for u in users)
         total_likes_recorded = sum(len(u.liked_videos) for u in users)
-        videos_with_zero_views = [v.url for v in videos if not v.viewers and v.url != "N/A"]
+        videos_with_zero_views = [v.url for v in videos if hasattr(v,'viewers') and not v.viewers and getattr(v, 'url', 'N/A') != "N/A"]
         users_with_zero_watches = [u.user_id for u in users if not u.watched_videos]
 
         print(f"总记录观看次数: {total_watches_recorded}")
@@ -1136,203 +1232,308 @@ if __name__ == "__main__":
              print("整体点赞率: N/A (无观看记录)")
         print(f"模拟后仍无观看记录的视频数: {len(videos_with_zero_views)}")
         if videos_with_zero_views:
-             print(f"  (示例: {videos_with_zero_views[:5]})") # Show a few examples
+             print(f"  (注意: 这可能包括未被选中强制观看的视频，如果存在)")
         print(f"模拟后无观看记录的用户数: {len(users_with_zero_watches)}")
-        # Add more validation if needed (e.g., check consistency between user history and video stats)
 
 
         # === Step 6: Generate Detailed Report ===
         print(f"\n--- [步骤 6] 生成详细报告 ---")
-        save_detailed_report(users, videos, OUTPUT_FILENAME) # Uses global OUTPUT_FILENAME
+        save_detailed_report(users, videos, OUTPUT_FILENAME)
+
 
         # === Step 7: Advanced Clustering Analysis ===
         print(f"\n--- [步骤 7] 高级聚类分析 ---")
 
-        # F6: 视频聚类分析 (*** 这是修改的核心区域 ***)
+        # F6: 视频聚类分析
         try:
-            # 记录开始时间
             video_cluster_start_time = time.time()
-
-            # -------------------- 使用优化版聚类函数 --------------------
-            print("\n执行视频聚类分析 (使用优化版：稀疏矩阵 + 可选SVD + 平衡)...")
-
-            # 调用新的优化函数 cluster_videos_by_viewers_balanced_optimized
-            # 注意：这里传递了新的参数 svd_components 和 mbk_n_init
-            video_clusters = video_clustering.cluster_videos_by_viewers_balanced_optimized(
+            print("\n执行视频聚类分析 (基于用户观看行为)...")
+            # --- 使用最新的聚类函数 ---
+            # Ensure the clustering function returns a DataFrame or None
+            temp_video_clusters = video_clustering.cluster_videos_by_viewers_balanced_optimized(
                 videos=videos,
                 users=users,
-                n_clusters=100,  # 初始目标簇数 (函数内部仍强制为100开始)
-                batch_size=5000,  # MiniBatchKMeans 的批处理大小 (可调)
-                max_size_factor=1.8,  # 控制簇平衡的严格程度 (越小越严格)
-                split_k=2,  # 将过大的簇拆分成 k 个子簇
-                svd_components=150,  # SVD降维的目标维度 (关键调优参数! 0 表示禁用)
-                mbk_n_init=5  # MiniBatchKMeans 的 n_init (建议比默认值小以加速)
+                n_clusters=100, # Adjust as needed
+                batch_size=5000,
+                max_size_factor=1.8,
+                split_k=2,
+                svd_components=150, # Or 0 to disable SVD
+                mbk_n_init=5
             )
-            # -------------------------------------------------------------
-
-            # (确保注释掉或删除了对旧的 cluster_videos_by_viewers_balanced 函数的调用)
-            # print("  使用 MiniBatchKMeans + 后处理平衡聚类...")
-            # video_clusters = video_clustering.cluster_videos_by_viewers_balanced(
-            #     videos,
-            #     users,
-            #     n_clusters=100,
-            #     max_size_factor=1.8,
-            #     split_k=2
-            # )
-
-            # 记录结束时间并打印耗时
-            video_cluster_end_time = time.time()
-            print(f"  >>> 优化版视频聚类耗时: {video_cluster_end_time - video_cluster_start_time:.2f} 秒 <<<")
-
-            # 检查聚类是否成功返回 DataFrame 且不为空
-            if video_clusters is None or video_clusters.empty:
-                print("  视频聚类未生成有效结果或返回空 DataFrame，跳过保存。")
+            # --- 存储结果 ---
+            if isinstance(temp_video_clusters, pd.DataFrame):
+                 video_clusters = temp_video_clusters # Store the result
+                 print(f"视频聚类完成，生成了 {len(video_clusters)} 条记录的 DataFrame。")
             else:
-                # 保存到独立Excel (*** 修改输出文件名以区分 ***)
-                video_cluster_file = "video_clusters_optimized_balanced.xlsx"  # <--- 新的文件名
-                print(f"  准备将优化版聚类结果保存到 '{video_cluster_file}'...")
+                 print("视频聚类未返回有效的 DataFrame。")
+                 video_clusters = pd.DataFrame() # Keep it as an empty DataFrame
+
+            video_cluster_end_time = time.time()
+            print(f"  >>> 视频聚类耗时: {video_cluster_end_time - video_cluster_start_time:.2f} 秒 <<<")
+
+            # 保存结果 (仅当 DataFrame 非空时)
+            if not video_clusters.empty:
+                video_cluster_file = "video_clusters_optimized_balanced.xlsx"
+                print(f"  准备将聚类结果保存到 '{video_cluster_file}'...")
                 try:
                     with pd.ExcelWriter(video_cluster_file) as writer:
-                        # 保存详细的聚类结果
+                        # 保存详情
                         video_clusters.to_excel(writer, sheet_name="视频聚类详情", index=False)
                         print(f"    已写入 '视频聚类详情' sheet ({len(video_clusters)} 行)。")
 
-                        # 添加聚类统计信息 (使用新函数实际产生的列名)
+                        # 保存统计 (确保列存在)
                         print("    计算并写入 '聚类统计' sheet...")
-                        # 确保 '聚类ID' 和 '观看该视频的用户数' 列存在
-                        if "聚类ID" in video_clusters.columns and "观看该视频的用户数" in video_clusters.columns:
-                            # 使用 '观看该视频的用户数' 和 '聚类内视频数' 进行聚合
+                        required_stat_cols = ["聚类ID", "视频URL", "观看该视频的用户数", "聚类内视频数"]
+                        if all(col in video_clusters.columns for col in required_stat_cols):
                             cluster_stats = video_clusters.groupby("聚类ID").agg(
-                                视频数量=("视频URL", "count"),  # 使用 '视频URL' 列计数
-                                平均观看用户数_每个视频=("观看该视频的用户数", "mean"),  # 使用优化函数输出的列名
-                                # 实际簇大小直接从DataFrame中获取，避免重复计算
-                                # unique() 更适合获取单一值，这里用 first()
-                                # 或者直接使用 '聚类内视频数' 列，但确保其存在
-                                实际簇大小=("聚类内视频数", "first")  # 假设 '聚类内视频数' 列已正确添加
+                                视频数量=("视频URL", "count"),
+                                平均观看用户数_每个视频=("观看该视频的用户数", "mean"),
+                                实际簇大小=("聚类内视频数", "first") # Assuming this column exists and is consistent per cluster
                             ).reset_index()
-
                             cluster_stats.to_excel(writer, sheet_name="聚类统计", index=False)
                             print(f"      写入了 {len(cluster_stats)} 个聚类的统计信息。")
                         else:
-                            print(
-                                "    警告：无法生成聚类统计，因为 '聚类ID', '观看该视频的用户数' 或 '聚类内视频数' 列在结果中缺失。")
+                             missing_stat_cols = [c for c in required_stat_cols if c not in video_clusters.columns]
+                             print(f"    警告：无法生成聚类统计，结果 DataFrame 缺少列: {missing_stat_cols}。")
 
-                    print(f"  优化版视频聚类结果已保存到 {video_cluster_file}")
+                    print(f"  视频聚类结果已保存到 {video_cluster_file}")
                 except Exception as save_err:
-                    print(f"  错误：保存优化版视频聚类结果到Excel时失败: {save_err}")
-                    # 可以尝试保存为CSV作为备选
+                    print(f"  错误：保存视频聚类结果到Excel时失败: {save_err}")
+                    # Optional: Save as CSV backup
                     try:
                         csv_path = os.path.splitext(video_cluster_file)[0] + ".csv"
                         video_clusters.to_csv(csv_path, index=False, encoding='utf-8-sig')
                         print(f"  已尝试将结果保存为 CSV: {csv_path}")
                     except Exception as csv_save_err:
                         print(f"  错误：尝试保存为 CSV 也失败了: {csv_save_err}")
-
+            else:
+                 print("  视频聚类结果为空，跳过保存。")
 
         except AttributeError as ae:
             print(f"\n视频聚类失败：属性错误 - {ae}")
-            print(
-                "  请确保 'video_clustering.py' 文件中存在名为 'cluster_videos_by_viewers_balanced_optimized' 的函数。")
+            print("  请确保 'video_clustering.py' 文件中存在所需的函数和属性。")
+            video_clusters = pd.DataFrame() # Ensure it's empty on error
         except Exception as e:
             print(f"\n视频聚类或结果保存时发生错误: {str(e)}")
             print("详细错误追踪:")
             traceback.print_exc()
+            video_clusters = pd.DataFrame() # Ensure it's empty on error
+
+
         # F7: 用户聚类分析
         try:
             print("\n执行用户聚类分析...")
-            user_clusters = user_clustering.cluster_users_by_interests(users, videos, n_clusters=100)
+            # --- 存储结果 ---
+            temp_user_clusters = user_clustering.cluster_users_by_interests(users, videos, n_clusters=100)
+            if isinstance(temp_user_clusters, pd.DataFrame):
+                 user_clusters = temp_user_clusters
+                 print(f"用户聚类完成，生成了 {len(user_clusters)} 条记录的 DataFrame。")
+            else:
+                 print("用户聚类未返回有效的 DataFrame。")
+                 user_clusters = pd.DataFrame()
 
-            # 保存到独立Excel
-            user_cluster_file = "user_clusters.xlsx"
-            with pd.ExcelWriter(user_cluster_file) as writer:
-                user_clusters.to_excel(writer, sheet_name="用户聚类", index=False)
+            # 保存结果 (仅当 DataFrame 非空时)
+            if not user_clusters.empty:
+                user_cluster_file = "user_clusters.xlsx"
+                with pd.ExcelWriter(user_cluster_file) as writer:
+                    user_clusters.to_excel(writer, sheet_name="用户聚类", index=False)
+                    # 添加聚类统计信息 (确保列存在)
+                    required_user_stat_cols = ["聚类ID", "用户ID", "观看类别数"]
+                    if all(col in user_clusters.columns for col in required_user_stat_cols):
+                         cluster_stats = user_clusters.groupby("聚类ID").agg(
+                              用户数量=("用户ID", "count"),
+                              平均类别数=("观看类别数", "mean")
+                         ).reset_index() # Add reset_index for cleaner output
+                         cluster_stats.to_excel(writer, sheet_name="聚类统计", index=False) # Save stats without index
+                    else:
+                         missing_user_stat_cols = [c for c in required_user_stat_cols if c not in user_clusters.columns]
+                         print(f"    警告：无法生成用户聚类统计，结果 DataFrame 缺少列: {missing_user_stat_cols}。")
 
-                # 添加聚类统计信息
-                cluster_stats = user_clusters.groupby("聚类ID").agg({
-                    "用户ID": "count",
-                    "观看类别数": "mean"
-                }).rename(columns={"用户ID": "用户数量", "观看类别数": "平均类别数"})
-                cluster_stats.to_excel(writer, sheet_name="聚类统计")
+                print(f"用户聚类结果已保存到 {user_cluster_file}")
+            else:
+                 print("  用户聚类结果为空，跳过保存。")
 
-            print(f"用户聚类结果已保存到 {user_cluster_file}")
+        except AttributeError as ae:
+             print(f"用户聚类失败：属性错误 - {ae}")
+             print("  请确保 'user_clustering.py' 文件中存在所需的函数和属性。")
+             user_clusters = pd.DataFrame() # Ensure it's empty on error
         except Exception as e:
-            print(f"用户聚类失败: {str(e)}")
+            print(f"用户聚类或保存失败: {str(e)}")
+            traceback.print_exc()
+            user_clusters = pd.DataFrame() # Ensure it's empty on error
 
-            # === Example Usage of New Functions ===
-        print("\n--- [步骤 8] API 函数示例调用 ---")
+        # === Step 8: User Center API Function Examples ===
+        # ... (用户中心函数调用保持不变) ...
+        print("\n--- [步骤 8] 用户中心 API 函数示例调用 ---")
+        if users and videos:
+            target_user_idx = 5
+            if 0 <= target_user_idx < len(users):
+                 print(f"\n获取用户索引 {target_user_idx} ({users[target_user_idx].user_id}) 的观看历史:")
+                 watched_history_json = user_center.get_user_history(target_user_idx, users, videos, history_type='watched')
+                 print(watched_history_json)
+            else: print(f"用户索引 {target_user_idx} 无效。")
 
-        if users and videos:  # Check if data exists
-                # Example 1: Get watched history for user index 5
+            target_user_idx = 10
+            if 0 <= target_user_idx < len(users):
+                 print(f"\n获取用户索引 {target_user_idx} ({users[target_user_idx].user_id}) 的点赞历史:")
+                 liked_history_json = user_center.get_user_history(target_user_idx, users, videos, history_type='liked')
+                 print(liked_history_json)
+            else: print(f"用户索引 {target_user_idx} 无效。")
+
+            if not user_clusters.empty: # Check if user clustering was successful
                 target_user_idx = 5
-                print(f"\n获取用户索引 {target_user_idx} 的观看历史:")
-                watched_history_json = user_center.get_user_history(target_user_idx, users, videos, history_type='watched')
-                print(watched_history_json)
-
-                # Example 2: Get liked history for user index 10
-                target_user_idx = 10
-                print(f"\n获取用户索引 {target_user_idx} 的点赞历史:")
-                liked_history_json = user_center.get_user_history(target_user_idx, users, videos, history_type='liked')
-                print(liked_history_json)
-
-                # Example 3: Get similar users for user index 5 (requires user_clusters_result_df)
-                if user_clusters is not None:
-                    target_user_idx = 5
-                    print(f"\n获取与用户索引 {target_user_idx} 相似的用户 (Top 5):")
-                    similar_users_json = user_center.get_similar_users(target_user_idx, users, user_clusters, top_n=5)
-                    print(similar_users_json)
-                else:
-                    print("\n无法获取相似用户，因为用户聚类数据不可用。")
-
+                if 0 <= target_user_idx < len(users):
+                     print(f"\n获取与用户索引 {target_user_idx} ({users[target_user_idx].user_id}) 相似的用户 (Top 5):")
+                     similar_users_json = user_center.get_similar_users(target_user_idx, users, user_clusters, top_n=5)
+                     print(similar_users_json)
+                else: print(f"用户索引 {target_user_idx} 无效。")
+            else:
+                print("\n无法获取相似用户，因为用户聚类数据不可用或为空。")
         else:
-                print("\n无法执行示例调用，因为用户或视频数据未加载。")
+            print("\n无法执行用户中心示例调用，因为用户或视频数据未加载。")
 
-        print("\n高级聚类分析完成!")
 
+        # === [修改] Step 9: Video Playing API 函数调用测试 (使用 ID) ===
+        print("\n--- [步骤 9] 视频播放/推荐 API 函数调用测试 (基于 ID) ---")
+
+        # --- 前提检查 ---
         if 'videos' in locals() and videos:
-            print("\n--- [新增] API 函数调用测试 ---")
+            # --- 获取一些有效的视频 ID 用于测试 ---
+            valid_ids_to_test = [v.id for v in videos[:5] if hasattr(v, 'id') and v.id] # Get first 5 valid IDs
+            if not valid_ids_to_test:
+                 # Try getting ID from later in the list if first few are bad
+                 valid_ids_to_test = [v.id for v in videos[len(videos)//2 : len(videos)//2 + 5] if hasattr(v, 'id') and v.id]
 
-            test_play_index = 15
-            print(f"\n[测试] 获取视频索引 {test_play_index} 的播放信息:")
-            play_info_json = videos_playing.play_video(test_play_index, videos)
-            print(play_info_json)
+            if valid_ids_to_test:
+                test_play_id = valid_ids_to_test[0] # Use the first valid ID found
+                print(f"\n[测试] 获取视频 ID '{test_play_id}' 的播放信息:")
+                play_info_json_id = videos_playing.play_video_by_id(test_play_id, videos)
+                print(play_info_json_id)
 
-            test_play_invalid_index = -1
-            print(f"\n[测试] 获取视频索引 {test_play_invalid_index} 的播放信息 (无效索引):")
-            play_info_json_invalid = videos_playing.play_video(test_play_invalid_index, videos)
-            print(play_info_json_invalid)
+                # 测试一个理论上不存在的 ID
+                test_play_invalid_id = "ID_绝对_不_存在_999"
+                print(f"\n[测试] 获取视频 ID '{test_play_invalid_id}' 的播放信息 (无效 ID):")
+                play_info_json_invalid_id = videos_playing.play_video_by_id(test_play_invalid_id, videos)
+                print(play_info_json_invalid_id)
 
-            test_similar_index = 30
-            num_to_find = 5
-            print(f"\n[测试] 获取与视频索引 {test_similar_index} 相似的 {num_to_find} 个视频:")
-            similar_videos_json = videos_playing.get_similar_videos(test_similar_index, videos, num_similar=num_to_find)
-            print(similar_videos_json)
+                # --- 测试 get_similar_videos_by_id ---
+                # 检查 video_clusters 是否有效
+                if 'video_clusters' in locals() and isinstance(video_clusters, pd.DataFrame) and not video_clusters.empty:
+                    test_similar_id = valid_ids_to_test[-1] # Use the last valid ID found
+                    num_to_find = 5
+                    print(f"\n[测试] 获取与视频 ID '{test_similar_id}' 相似的 {num_to_find} 个视频:")
+                    similar_videos_json_id = videos_playing.get_similar_videos_by_id(
+                        test_similar_id,
+                        videos,
+                        video_clusters, # 传递聚类结果 DataFrame
+                        num_similar=num_to_find
+                    )
+                    print(similar_videos_json_id)
 
-            num_to_find_small = 3
-            print(f"\n[测试] 获取与视频索引 {test_similar_index} 相似的 {num_to_find_small} 个视频:")
-            similar_videos_json_small = videos_playing.get_similar_videos(test_similar_index, videos, num_similar=num_to_find_small)
-            print(similar_videos_json_small)
+                    # 测试一个理论上不存在的 ID
+                    test_similar_nonexistent_id = "ID_绝对_不_存在_用于相似度_888"
+                    print(f"\n[测试] 获取与视频 ID '{test_similar_nonexistent_id}' 相似的视频 (无效 ID):")
+                    similar_videos_json_invalid_id = videos_playing.get_similar_videos_by_id(
+                        test_similar_nonexistent_id,
+                        videos,
+                        video_clusters,
+                        num_similar=num_to_find
+                    )
+                    print(similar_videos_json_invalid_id)
+                else:
+                    print("\n错误：无法执行 get_similar_videos_by_id 测试，因为 'video_clusters' DataFrame 不存在、无效或为空。")
+                    print(f"  (video_clusters 类型: {type(video_clusters)}, 是否为空: {video_clusters.empty if isinstance(video_clusters, pd.DataFrame) else 'N/A'})")
 
-
-
+            else:
+                print("\n错误：在 'videos' 列表中找不到有效的视频 ID 用于 API 函数测试。")
         else:
-            print("\n错误：全局变量 'videos' 不存在或为空，无法执行 API 函数测试。")
+            print("\n错误：'videos' 列表不存在或为空，无法执行视频播放/推荐 API 函数测试。")
+
+        # 使用示例
+        output_csv_file = "videos_output.csv"
+        save_videos_to_csv(videos, output_csv_file)
+        # 示例：调用该函数并传入 `users` 列表
+        save_users_to_csv(users)
+        # 这是您的主脚本保存的Excel文件的路径
+        cluster_excel_file_path = "video_clusters_optimized_balanced.xlsx"
+        # 这是您要读取的工作表的名称
+        target_sheet_name = "视频聚类详情"  # 主数据通常在这个sheet
+
+        expected_column_dtypes = {
+            "视频URL": "object",  # 'object' 通常用于字符串
+            "聚类ID": "int64",  # 或者 'int32' 如果数值范围允许
+            "观看该视频的用户数": "int64",  # 或者 'int32'
+            "聚类内视频数": "int64"  # 或者 'int32'
+        }
+        # 确保这里的列名与您的Excel文件 "视频聚类详情" 工作表中的列名完全匹配。
+
+        print(f"\n--- 场景 1: 从Excel '{target_sheet_name}' 工作表使用期望的数据类型加载 ---")
+
+        # 为了使这个示例能独立运行，如果Excel文件不存在，我们创建一个虚拟的
+        if not os.path.exists(cluster_excel_file_path):
+            print(f"警告: '{cluster_excel_file_path}' 不存在。将创建一个虚拟Excel文件用于测试。")
+            # 确保虚拟数据的列与 expected_column_dtypes 中的键匹配
+            dummy_data_details = {
+                "视频URL": ["http://example.com/vid1_excel", "http://example.com/vid2_excel",
+                            "http://example.com/vid3_excel"],
+                "聚类ID": [10, 11, 10],
+                "观看该视频的用户数": [1000, 500, 1200],
+                "聚类内视频数": [20, 10, 20]
+            }
+            dummy_df_details = pd.DataFrame(dummy_data_details)
+
+            # 您的Excel文件有两个sheet，我们也创建两个
+            dummy_data_stats = {  # 假设的统计数据表结构 (与主脚本中的一致)
+                "聚类ID": [10, 11],
+                "视频数量": [2, 1],
+                "平均观看用户数_每个视频": [1100.0, 500.0],  # 注意这个可能是 float
+                "实际簇大小": [20, 10]
+            }
+            dummy_df_stats = pd.DataFrame(dummy_data_stats)
+
+            try:
+                # 需要安装 openpyxl: pip install openpyxl
+                with pd.ExcelWriter(cluster_excel_file_path, engine='openpyxl') as writer:
+                    dummy_df_details.to_excel(writer, sheet_name="视频聚类详情", index=False)
+                    dummy_df_stats.to_excel(writer, sheet_name="聚类统计", index=False)
+                print(f"虚拟Excel文件 '{cluster_excel_file_path}' 已创建。")
+            except Exception as ex_create_err:
+                print(f"创建虚拟Excel文件失败: {ex_create_err}")
+                print("  请确保已安装 'openpyxl' 库 (pip install openpyxl)。")
+
+        reloaded_clusters_from_excel_with_types = load_clusters_from_excel_with_dtypes(
+            excel_filepath=cluster_excel_file_path,
+            sheet_name=target_sheet_name,
+            expected_dtypes=expected_column_dtypes
+        )
+
+        if not reloaded_clusters_from_excel_with_types.empty:
+            print(f"\n从Excel '{target_sheet_name}' 重新加载的视频聚类数据 (指定了Dtypes):")
+            print(reloaded_clusters_from_excel_with_types.head())
+            print("\n数据类型:")
+            print(reloaded_clusters_from_excel_with_types.dtypes)  # 再次确认数据类型
+    # === 异常处理和结束 ===
     except FileNotFoundError as fnf:
-        print(f"错误：找不到所需文件! {fnf}")
+        print(f"致命错误：找不到所需文件! {fnf}", file=sys.stderr)
         print("请确认所有输入文件路径正确，或检查相关目录权限。")
     except PermissionError as pe:
-        print(f"错误：无权限访问所需文件或文件夹! {pe}")
+        print(f"致命错误：无权限访问所需文件或文件夹! {pe}", file=sys.stderr)
         print("请确认您有足够的系统权限，或者相关文件未被其他程序占用。")
     except MemoryError:
-        print("错误：系统内存不足!")
-        print("提示: 尝试减少处理的数据量，或在更多内存的计算机上运行。")
+        print("致命错误：系统内存不足!", file=sys.stderr)
+        print("提示: 尝试减少处理的数据量，关闭其他应用程序，或在更多内存的计算机上运行。")
     except KeyboardInterrupt:
-        print("\n程序被用户中断!")
+        print("\n程序被用户中断!", file=sys.stderr)
         print("部分处理结果可能已保存。")
+    except RuntimeError as rte: # Catch specific runtime errors raised
+         print(f"运行时错误: {rte}", file=sys.stderr)
     except Exception as e:
-        print(f"发生未预期的错误: {e}")
-        # Uncomment for debugging
-        # import traceback
-        # traceback.print_exc()
+        print(f"发生未预期的致命错误: {e.__class__.__name__} - {e}", file=sys.stderr)
+        print("详细错误追踪:", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr) # Print full traceback for unexpected errors
     finally:
-        print("\n程序退出。")
-        # Any cleanup code here if needed (e.g., temporary files)
+        main_end_time = time.time()
+        print(f"\n程序总执行时间: {main_end_time - main_start_time:.2f} 秒。")
+        print("程序退出。")
+        # Any cleanup code here if needed
+        gc.collect() # Final garbage collection attempt
